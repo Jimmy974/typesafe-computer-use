@@ -33,12 +33,18 @@ Each step:
    the run.
 3. The accessibility API reports the focused element: role, label,
    placeholder, current value, frame. AppleScript reports the frontmost app
-   and the browser's active tab URL.
-4. One TypeSafe request carries three Choices:
+   and the browser's active tab URL. State also carries the local date and
+   time.
+4. Dates in OCR text are parsed in code (month-name, numeric, ISO forms) and
+   each dated block gets `dated 2026-10-13 (in 27 days)`. Blocks within a
+   short vertical distance of a dated line get `near a line dated ...`, so a
+   "Register Now" button inherits its event's date. The classifier does no
+   calendar math, so the comparison is handed to it as a fact.
+5. One TypeSafe request carries three Choices:
    - `kind`: what sort of action, from the fixed set below plus `click_item`.
    - `item`: which OCR block, used only when `kind` is `click_item`.
    - `site`: which catalog site, used only when `kind` is `open_site`.
-5. The winning action runs deterministically. An OCR index clicks the block's
+6. The winning action runs deterministically. An OCR index clicks the block's
    center, converted from Retina pixels to screen points.
 
 The classifier never generates text. The only free text comes from the writer
@@ -76,8 +82,8 @@ concentration, reads as doubt.
 - Slam the mouse into the top-left corner. Checked before every step and every
   100 ms during the post-action delay. Works from any app.
 - On its own: `done` or `none`, confidence under `--min-confidence` (0.4),
-  two consecutive no-ops (a refused or failed action, or `wait`), or `--steps`
-  (12).
+  two consecutive no-ops (a refused or failed action, `wait`, or the same
+  click repeated on the same URL), or `--steps` (12).
 
 ## Run folder
 
@@ -104,7 +110,7 @@ and opens the image and text file. `--no-open` only writes them.
 --min-confidence X    gate on the winning question's confidence (0.4)
 --delay S             seconds to wait after each action (2.0)
 --out DIR             run folder (runs/<timestamp>)
---image PNG --app A   replay a saved capture as if app A were in front; never acts
+--image PNG --app A --url U   replay a saved capture as if app A were in front at URL U; never acts
 ```
 
 Replay is how to iterate on prompts and criteria without touching the screen:

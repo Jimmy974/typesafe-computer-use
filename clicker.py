@@ -20,6 +20,8 @@ Escape hatches while --act is running:
 from __future__ import annotations
 
 import argparse
+import re
+from datetime import date, datetime
 import json
 import os
 import subprocess
@@ -258,7 +260,7 @@ def focused_field() -> Field | None:
     )
 
 
-def capture(image_path: Path | None = None, app: str | None = None) -> Screen:
+def capture(image_path: Path | None = None, app: str | None = None, url: str | None = None) -> Screen:
     if image_path is None:
         image_path = Path(tempfile.mkdtemp()) / "screen.png"
         subprocess.run(["screencapture", "-x", "-D", "1", str(image_path)], check=True, capture_output=True)
@@ -269,7 +271,7 @@ def capture(image_path: Path | None = None, app: str | None = None) -> Screen:
         scale=image.width / points_wide,
         app=app or frontmost_app(),
         field=None if image_path and app else focused_field(),
-        url=None if image_path and app else browser_url(),
+        url=url if url is not None else (None if image_path and app else browser_url()),
     )
 
 
@@ -329,6 +331,73 @@ def near_field(screen: Screen, items: list[Item], radius_pt: float = 160) -> lis
     return out
 
 
+# --------------------------------------------------------------------------- dates
+
+MONTHS = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
+DATE_RE = re.compile(
+    r"\b(?:(?P<mon>jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+(?P<day>\d{1,2})(?:\s*[-\u2013\u2014]\s*\d{1,2})?(?:,?\s+(?P<year>\d{4}))?"
+    r"|(?P<day2>\d{1,2})\s+(?P<mon2>jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?(?:,?\s+(?P<year2>\d{4}))?"
+    r"|(?P<iso>\d{4}-\d{2}-\d{2})"
+    r"|(?P<m>\d{1,2})/(?P<d>\d{1,2})/(?P<y>\d{4}))\b",
+    re.IGNORECASE,
+)
+
+
+def now_context() -> dict:
+    now = datetime.now().astimezone()
+    return {"local_time": now.strftime("%Y-%m-%d %H:%M %A"), "timezone": now.strftime("%Z"), "today": now.date().isoformat()}
+
+
+def first_date(text: str) -> date | None:
+    m = DATE_RE.search(text)
+    if not m:
+        return None
+    today = date.today()
+    try:
+        if m.group("iso"):
+            return date.fromisoformat(m.group("iso"))
+        if m.group("m"):
+            return date(int(m.group("y")), int(m.group("m")), int(m.group("d")))
+        mon = (m.group("mon") or m.group("mon2"))[:3].lower()
+        day = int(m.group("day") or m.group("day2"))
+        year = m.group("year") or m.group("year2")
+        d = date(int(year) if year else today.year, MONTHS[mon], day)
+        if not year and (today - d).days > 60:
+            d = d.replace(year=today.year + 1)
+        return d
+    except ValueError:
+        return None
+
+
+def describe_offset(d: date) -> str:
+    delta = (d - date.today()).days
+    if delta == 0:
+        return f"{d.isoformat()} (today)"
+    if delta > 0:
+        return f"{d.isoformat()} (in {delta} days)"
+    return f"{d.isoformat()} ({-delta} days ago)"
+
+
+def date_hints(items: list[Item], screen: Screen) -> dict[int, str]:
+    """Item index -> 'dated ...' for items containing a date, or 'near a line dated ...' for close neighbours."""
+    dated = {it.index: first_date(it.text) for it in items}
+    dated = {i: d for i, d in dated.items() if d is not None}
+    hints = {i: f"dated {describe_offset(d)}" for i, d in dated.items()}
+    if not dated:
+        return hints
+    by_index = {it.index: it for it in items}
+    for it in items:
+        if it.index in hints:
+            continue
+        cy = it.center[1]
+        best = min(dated, key=lambda i: abs(by_index[i].center[1] - cy))
+        gap = abs(by_index[best].center[1] - cy)
+        if gap < 60 * screen.scale:
+            hints[it.index] = f"near a line dated {describe_offset(dated[best])}"
+    return hints
+
+
 # --------------------------------------------------------------------------- decisions
 
 
@@ -363,15 +432,26 @@ def fixed_actions(email: str | None) -> dict[str, str]:
 
 
 def base_state(goal: str, screen: Screen, items: list[Item], history: list[str]) -> dict:
+    hints = date_hints(items, screen)
     return {
         "goal": goal,
+        "now": now_context(),
         "frontmost_app": screen.app,
         "browser_active_tab_url": screen.url,
         "focused_field": screen.field.summary() if screen.field else None,
         "previous_actions": history[-8:],
         "screen_text_in_reading_order": [
-            {"i": it.index, "text": it.text, "where": screen.region(it)} for it in items
+            {"i": it.index, "text": it.text, "where": screen.region(it), **({"when": hints[it.index]} if it.index in hints else {})}
+            for it in items
         ],
+    }
+
+
+def item_criteria(screen: Screen, items: list[Item]) -> dict[str, str]:
+    hints = date_hints(items, screen)
+    return {
+        str(it.index): f"{it.text!r} ({screen.region(it)}{'; ' + hints[it.index] if it.index in hints else ''})"
+        for it in items
     }
 
 
@@ -395,7 +475,7 @@ def decide(client: TypeSafeClient, goal: str, screen: Screen, items: list[Item],
     if items:
         questions["item"] = Choice(
             instructions="If clicking an on-screen item is the right move, which item?",
-            criteria={str(it.index): f"{it.text!r} ({screen.region(it)})" for it in items},
+            criteria=item_criteria(screen, items),
         )
     answers = client.system_one(state=base_state(goal, screen, items, history), questions=questions).answers
     return answers["kind"], answers.get("item"), answers["site"]
@@ -405,6 +485,7 @@ def compose_text(writer: anthropic.Anthropic, goal: str, screen: Screen, items: 
     """Ask the writing model for the exact string to type into the focused field. Empty means decline."""
     packet = {
         "goal": goal,
+        "now": now_context(),
         "frontmost_app": screen.app,
         "previous_actions": history[-8:],
         "focused_field": screen.field.summary() if screen.field else None,
@@ -451,7 +532,7 @@ def compose_url(writer: anthropic.Anthropic, goal: str, history: list[str]) -> s
             "Given a user's goal for their web browser, give the single best https URL to open first. "
             "Prefer the site's homepage or the most direct public page. If no website is implied, set ok to false."
         ),
-        messages=[{"role": "user", "content": json.dumps({"goal": goal, "previous_actions": history[-8:]})}],
+        messages=[{"role": "user", "content": json.dumps({"goal": goal, "now": now_context(), "previous_actions": history[-8:]})}],
         output_config={
             "format": {
                 "type": "json_schema",
@@ -569,12 +650,11 @@ def render_payload(goal: str, screen: Screen, items: list[Item], history: list[s
     """Human-readable dump of exactly what goes to TypeSafe for this screen, plus the OCR block table."""
     kinds = {"click_item": "Click one of the on-screen text items (chosen in the item question)."}
     kinds.update(fixed_actions(email))
-    item_criteria = {str(it.index): f"{it.text!r} ({screen.region(it)})" for it in items}
     rule = "=" * 78
     parts = [
         rule, "STATE  (sent as `state`)", rule, json.dumps(base_state(goal, screen, items, history), indent=2), "",
         rule, "QUESTION kind  (Choice criteria)", rule, json.dumps(kinds, indent=2), "",
-        rule, "QUESTION item  (Choice criteria)", rule, json.dumps(item_criteria, indent=2), "",
+        rule, "QUESTION item  (Choice criteria)", rule, json.dumps(item_criteria(screen, items), indent=2), "",
         rule, "QUESTION site  (Choice criteria)", rule, json.dumps({**SITES, "none": "No website is needed."}, indent=2), "",
         rule,
         f"OCR BLOCKS  ({len(items)} after merge/filter; pixel boxes on the {screen.image.width}x{screen.image.height} capture, scale {screen.scale:g})",
@@ -617,9 +697,9 @@ def top(answer, n: int = 5) -> list[tuple[str, float]]:
 # --------------------------------------------------------------------------- loop
 
 
-def run_step(args, typesafe: TypeSafeClient, writer, step: int, history: list[str], email: str | None, noops: list[int]) -> bool:
+def run_step(args, typesafe: TypeSafeClient, writer, step: int, history: list[str], email: str | None, noops: list[int], last_url: list) -> bool:
     check_abort()
-    screen = capture(args.image, args.app)
+    screen = capture(args.image, args.app, args.url)
     items = ocr(screen, MAX_OPTIONS, args.goal)
     prefix = args.out / f"step-{step:02d}"
     screen.image.save(prefix.with_name(prefix.name + "-raw.png"))
@@ -665,9 +745,11 @@ def run_step(args, typesafe: TypeSafeClient, writer, step: int, history: list[st
         return False
 
     what = perform(chosen, site.choice, screen, items, email, (typesafe, writer, args.goal, history))
+    repeated = bool(history) and history[-1] == what and screen.url == last_url[0]
+    last_url[0] = screen.url
     history.append(what)
     log(f"  did: {what}")
-    if "refused" in what or "failed" in what or what == "waited":
+    if "refused" in what or "failed" in what or what == "waited" or repeated:
         noops[0] += 1
         if noops[0] >= 2:
             log("  two consecutive no-ops; stopping")
@@ -710,6 +792,7 @@ def main() -> None:
     parser.add_argument("--out", type=Path, default=Path("runs") / time.strftime("%Y%m%d-%H%M%S"))
     parser.add_argument("--image", type=Path, help="replay against a saved screenshot instead of capturing (never acts)")
     parser.add_argument("--app", help="frontmost app name to report to the model (for --image replays)")
+    parser.add_argument("--url", help="browser URL to report to the model (for --image replays)")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     global LOG_FILE
@@ -727,12 +810,13 @@ def main() -> None:
 
     history: list[str] = []
     noops = [0]
+    last_url = [None]
     outcome = "completed"
     started = time.time()
     try:
         with TypeSafeClient() as typesafe:
             for step in range(1, args.steps + 1):
-                if not run_step(args, typesafe, writer, step, history, email, noops):
+                if not run_step(args, typesafe, writer, step, history, email, noops, last_url):
                     break
             else:
                 log(f"\nstopped after {args.steps} steps")
