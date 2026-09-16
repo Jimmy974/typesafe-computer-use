@@ -28,8 +28,7 @@ a fixed set of deterministic actions is always offered:
 
 | key | does |
 |---|---|
-| `switch_to_browser` | `open -a "Google Chrome"` |
-| `open_site` | activate Chrome, Cmd-L, type the URL of the site picked by a second Choice over `SITES`, Return |
+| `go_to_browser` | activate Chrome; if a site is needed, Cmd-L, type the URL picked by a second Choice over `SITES`, Return |
 | `type_email` | types `$CLICKER_EMAIL` (only offered when set) |
 | `press_enter`, `press_escape` | keyboard |
 | `scroll_down`, `scroll_up` | 10 lines |

@@ -173,8 +173,14 @@ def ocr(screen: Screen, budget: int) -> list[Item]:
 
 def fixed_actions(email: str | None) -> dict[str, str]:
     actions = {
-        "switch_to_browser": f"Bring {BROWSER} to the front (use when the goal needs a website and the browser is not in front).",
-        "open_site": "Open a new browser tab and go to a known website chosen in a follow-up question.",
+        "switch_to_browser": (
+            f"Bring {BROWSER} to the front to continue with whatever page is already open there. "
+            "Not for reaching a specific website: open_site does that on its own, even from another app."
+        ),
+        "open_site": (
+            "Navigate the browser to a known website (chosen in the follow-up question). "
+            "This is the only way to go to a site: never click the address bar, a URL, or a search box to get there."
+        ),
         "press_enter": "Press Return to submit the focused form or field.",
         "press_escape": "Press Escape to dismiss a dialog, menu, or popup.",
         "scroll_down": "Scroll down to reveal more of the page.",
@@ -205,9 +211,10 @@ def decide(client: TypeSafeClient, goal: str, screen: Screen, items: list[Item],
             "action": Choice(
                 instructions=(
                     "You are driving this computer one action at a time. Which single action "
-                    "makes the most progress toward the goal right now? Prefer clicking an "
-                    "on-screen item when one clearly fits. Do not repeat an action that was "
-                    "just taken unless the screen changed."
+                    "makes the most progress toward the goal right now? Click an on-screen item "
+                    "when one clearly fits; use a fixed action when the goal needs something the "
+                    "screen does not offer. Do not repeat an action that was just taken unless "
+                    "the screen changed."
                 ),
                 criteria=criteria,
             ),
