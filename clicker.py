@@ -555,6 +555,42 @@ def perform(key: str, site_key: str, screen: Screen, items: list[Item], email: s
 # --------------------------------------------------------------------------- reporting
 
 
+LOG_FILE: Path | None = None
+
+
+def log(msg: str = "") -> None:
+    print(msg)
+    if LOG_FILE is not None:
+        with LOG_FILE.open("a") as f:
+            f.write(msg + "\n")
+
+
+def render_payload(goal: str, screen: Screen, items: list[Item], history: list[str], email: str | None) -> str:
+    """Human-readable dump of exactly what goes to TypeSafe for this screen, plus the OCR block table."""
+    kinds = {"click_item": "Click one of the on-screen text items (chosen in the item question)."}
+    kinds.update(fixed_actions(email))
+    item_criteria = {str(it.index): f"{it.text!r} ({screen.region(it)})" for it in items}
+    rule = "=" * 78
+    parts = [
+        rule, "STATE  (sent as `state`)", rule, json.dumps(base_state(goal, screen, items, history), indent=2), "",
+        rule, "QUESTION kind  (Choice criteria)", rule, json.dumps(kinds, indent=2), "",
+        rule, "QUESTION item  (Choice criteria)", rule, json.dumps(item_criteria, indent=2), "",
+        rule, "QUESTION site  (Choice criteria)", rule, json.dumps({**SITES, "none": "No website is needed."}, indent=2), "",
+        rule,
+        f"OCR BLOCKS  ({len(items)} after merge/filter; pixel boxes on the {screen.image.width}x{screen.image.height} capture, scale {screen.scale:g})",
+        rule,
+    ]
+    for it in items:
+        cx, cy = it.center
+        parts.append(
+            f"[{it.index:3d}] conf={it.ocr_confidence:.2f} box=({it.x1:.0f},{it.y1:.0f})-({it.x2:.0f},{it.y2:.0f}) "
+            f"click_pt=({cx / screen.scale:.0f},{cy / screen.scale:.0f}) {screen.region(it):13} {it.text!r}"
+        )
+    if screen.field:
+        parts += ["", "FOCUSED FIELD", json.dumps(asdict(screen.field), indent=2)]
+    return "\n".join(parts) + "\n"
+
+
 def annotate(screen: Screen, items: list[Item], chosen: str, out: Path) -> None:
     im = screen.image.copy()
     draw = ImageDraw.Draw(im)
@@ -584,8 +620,10 @@ def top(answer, n: int = 5) -> list[tuple[str, float]]:
 def run_step(args, typesafe: TypeSafeClient, writer, step: int, history: list[str], email: str | None, noops: list[int]) -> bool:
     check_abort()
     screen = capture(args.image, args.app)
-    screen.image.save(args.out / f"step-{step:02d}-raw.png")
     items = ocr(screen, MAX_OPTIONS, args.goal)
+    prefix = args.out / f"step-{step:02d}"
+    screen.image.save(prefix.with_name(prefix.name + "-raw.png"))
+    prefix.with_name(prefix.name + "-payload.txt").write_text(render_payload(args.goal, screen, items, history, email))
 
     kind, item, site = decide(typesafe, args.goal, screen, items, history, email)
     by_index = {str(it.index): it for it in items}
@@ -593,45 +631,46 @@ def run_step(args, typesafe: TypeSafeClient, writer, step: int, history: list[st
     chosen = item.choice if clicking else kind.choice
     confidence = min(kind.confidence, item.confidence) if clicking else kind.confidence
 
-    out = args.out / f"step-{step:02d}.png"
+    out = prefix.with_suffix(".png")
     annotate(screen, items, chosen, out)
+    prefix.with_name(prefix.name + "-answers.json").write_text(json.dumps({
+        "kind": kind.choice, "kind_confidence": kind.confidence, "kind_probabilities": kind.probabilities,
+        "item": item.choice if item else None, "item_confidence": item.confidence if item else None,
+        "item_probabilities": item.probabilities if item else None,
+        "site": site.choice, "site_probabilities": site.probabilities,
+        "chosen": chosen, "confidence": confidence,
+        "items": [asdict(it) for it in items],
+        "field": asdict(screen.field) if screen.field else None,
+        "app": screen.app, "url": screen.url,
+    }, indent=2))
 
     field = f" field={screen.field.role}:{screen.field.label!r}" if screen.field else ""
-    print(f"\nstep {step}: app={screen.app!r}{field} items={len(items)} kind={kind.choice} ({kind.confidence:.2f}) site={site.choice}")
+    log(f"\nstep {step}: app={screen.app!r}{field} url={screen.url!r} items={len(items)} kind={kind.choice} ({kind.confidence:.2f}) site={site.choice}")
     for key, p in top(kind, 4):
-        print(f"  {p:5.2f}  {key}")
+        log(f"  {p:5.2f}  {key}")
     if item is not None:
-        print(f"  item ({item.confidence:.2f}):")
+        log(f"  item ({item.confidence:.2f}):")
         for key, p in top(item, 4):
-            print(f"  {p:5.2f}  [{key}] {by_index[key].text!r}")
-    print(f"  annotated: {out}")
-    if args.json:
-        out.with_suffix(".json").write_text(json.dumps({
-            "items": [asdict(it) for it in items],
-            "field": asdict(screen.field) if screen.field else None,
-            "kind": kind.choice, "kind_probabilities": kind.probabilities,
-            "item": item.choice if item else None,
-            "item_probabilities": item.probabilities if item else None,
-            "site": site.choice,
-        }, indent=2))
+            log(f"  {p:5.2f}  [{key}] {by_index[key].text!r}")
+    log(f"  files: {prefix.name}-raw.png, {prefix.name}.png, {prefix.name}-payload.txt, {prefix.name}-answers.json")
 
     if kind.choice in ("done", "none"):
-        print(f"  model says {kind.choice!r}; stopping")
+        log(f"  model says {kind.choice!r}; stopping")
         return False
     if confidence < args.min_confidence:
-        print(f"  confidence {confidence:.2f} below {args.min_confidence}; stopping")
+        log(f"  confidence {confidence:.2f} below {args.min_confidence}; stopping")
         return False
     if not args.act or args.image:
-        print(f"  would do: {chosen}. dry run (pass --act without --image to drive the machine)")
+        log(f"  would do: {chosen}. dry run (pass --act without --image to drive the machine)")
         return False
 
     what = perform(chosen, site.choice, screen, items, email, (typesafe, writer, args.goal, history))
     history.append(what)
-    print(f"  did: {what}")
+    log(f"  did: {what}")
     if "refused" in what or "failed" in what or what == "waited":
         noops[0] += 1
         if noops[0] >= 2:
-            print("  two consecutive no-ops; stopping")
+            log("  two consecutive no-ops; stopping")
             return False
     else:
         noops[0] = 0
@@ -647,32 +686,46 @@ def main() -> None:
     parser.add_argument("--min-confidence", type=float, default=0.4)
     parser.add_argument("--delay", type=float, default=2.0, help="seconds to wait after each action")
     parser.add_argument("--out", type=Path, default=Path("runs") / time.strftime("%Y%m%d-%H%M%S"))
-    parser.add_argument("--json", action="store_true", help="dump OCR items, field, and probabilities per step")
     parser.add_argument("--image", type=Path, help="replay against a saved screenshot instead of capturing (never acts)")
     parser.add_argument("--app", help="frontmost app name to report to the model (for --image replays)")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
+    global LOG_FILE
+    LOG_FILE = args.out / "run.log"
+    log(f"run folder: {args.out}")
 
     email = os.environ.get("CLICKER_EMAIL")
     writer = anthropic.Anthropic() if os.environ.get("ANTHROPIC_API_KEY") else None
     if args.act and not AS.AXIsProcessTrusted():
         sys.exit("this terminal lacks Accessibility permission; grant it in System Settings > Privacy & Security")
     if args.act:
-        print("driving the machine. abort: Ctrl-C, or slam the mouse into the top-left corner.")
+        log("driving the machine. abort: Ctrl-C, or slam the mouse into the top-left corner.")
         if writer is None:
-            print("ANTHROPIC_API_KEY not set: type_text will refuse; type_email still works.")
+            log("ANTHROPIC_API_KEY not set: type_text will refuse; type_email still works.")
 
     history: list[str] = []
     noops = [0]
+    outcome = "completed"
+    started = time.time()
     try:
         with TypeSafeClient() as typesafe:
             for step in range(1, args.steps + 1):
                 if not run_step(args, typesafe, writer, step, history, email, noops):
                     break
             else:
-                print(f"\nstopped after {args.steps} steps")
+                log(f"\nstopped after {args.steps} steps")
+                outcome = "step limit"
     except (KeyboardInterrupt, Abort) as e:
-        print(f"\naborted ({e or 'Ctrl-C'}) after {len(history)} actions")
+        outcome = f"aborted ({e or 'Ctrl-C'})"
+        log(f"\naborted ({e or 'Ctrl-C'}) after {len(history)} actions")
+    finally:
+        (args.out / "run.json").write_text(json.dumps({
+            "goal": args.goal, "act": args.act, "steps_taken": len(history), "outcome": outcome,
+            "seconds": round(time.time() - started, 1), "history": history,
+            "args": {k: str(v) for k, v in vars(args).items()},
+        }, indent=2))
+        log(f"run folder: {args.out}")
+    if outcome.startswith("aborted"):
         sys.exit(130)
 
 

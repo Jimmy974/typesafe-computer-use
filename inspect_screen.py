@@ -15,11 +15,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import subprocess
 import sys
 import time
-from dataclasses import asdict
 from pathlib import Path
 
 import clicker
@@ -30,47 +28,6 @@ def countdown(seconds: int) -> None:
         print(f"{n}...", end=" ", flush=True)
         time.sleep(1)
     print("capture")
-
-
-def render_text(goal: str, screen: clicker.Screen, items: list[clicker.Item]) -> str:
-    state = clicker.base_state(goal, screen, items, [])
-    kinds = {"click_item": "Click one of the on-screen text items (chosen in the item question)."}
-    kinds.update(clicker.fixed_actions(email=None))
-    item_criteria = {str(it.index): f"{it.text!r} ({screen.region(it)})" for it in items}
-    parts = [
-        "=" * 78,
-        "STATE  (sent as `state`)",
-        "=" * 78,
-        json.dumps(state, indent=2),
-        "",
-        "=" * 78,
-        "QUESTION kind  (Choice criteria)",
-        "=" * 78,
-        json.dumps(kinds, indent=2),
-        "",
-        "=" * 78,
-        "QUESTION item  (Choice criteria)",
-        "=" * 78,
-        json.dumps(item_criteria, indent=2),
-        "",
-        "=" * 78,
-        "QUESTION site  (Choice criteria)",
-        "=" * 78,
-        json.dumps({**clicker.SITES, "none": "No website is needed."}, indent=2),
-        "",
-        "=" * 78,
-        f"OCR BLOCKS  ({len(items)} after merge/filter; pixel boxes on the {screen.image.width}x{screen.image.height} capture, scale {screen.scale:g})",
-        "=" * 78,
-    ]
-    for it in items:
-        cx, cy = it.center
-        parts.append(
-            f"[{it.index:3d}] conf={it.ocr_confidence:.2f} box=({it.x1:.0f},{it.y1:.0f})-({it.x2:.0f},{it.y2:.0f}) "
-            f"click_pt=({cx / screen.scale:.0f},{cy / screen.scale:.0f}) {screen.region(it):13} {it.text!r}"
-        )
-    if screen.field:
-        parts += ["", "FOCUSED FIELD", json.dumps(asdict(screen.field), indent=2)]
-    return "\n".join(parts) + "\n"
 
 
 def main() -> None:
@@ -91,7 +48,7 @@ def main() -> None:
     text = args.out / "state.txt"
     screen.image.save(raw)
     clicker.annotate(screen, items, chosen="", out=annotated)
-    text.write_text(render_text(args.goal, screen, items))
+    text.write_text(clicker.render_payload(args.goal, screen, items, [], None))
 
     print(f"app={screen.app!r} url={screen.url!r} blocks={len(items)} field={screen.field.role if screen.field else None}")
     print(f"  {annotated}\n  {text}")
