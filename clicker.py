@@ -28,6 +28,7 @@ import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 import anthropic
 import ApplicationServices as AS
@@ -259,16 +260,45 @@ def capture(image_path: Path | None = None, app: str | None = None) -> Screen:
 
 def ocr(screen: Screen, budget: int, goal: str) -> list[Item]:
     raw = ocrmac.OCR(screen.image, recognition_level="accurate").recognize(px=True)
-    needle = " ".join(goal.lower().split())
+    norm = " ".join(goal.lower().split())
+    echoes = {norm[:24], norm[-24:]} if len(norm) >= 24 else {norm}
     kept = [
         (t.strip(), c, b)
         for t, c, b in raw
-        if t.strip() and c >= MIN_OCR_CONFIDENCE and needle not in " ".join(t.lower().split())
+        if t.strip() and c >= MIN_OCR_CONFIDENCE
+        and not any(e in " ".join(t.lower().split()) for e in echoes)
     ]
+    kept = merge_blocks(kept)
     heights = sorted(b[3] - b[1] for _, _, b in kept) or [1.0]
     row_h = max(1.0, heights[len(heights) // 2])
     kept.sort(key=lambda r: (round((r[2][1] + r[2][3]) / 2 / row_h), r[2][0]))
     return [Item(i, t, c, *b) for i, (t, c, b) in enumerate(kept[:budget])]
+
+
+def merge_blocks(lines: list[tuple[str, float, tuple[float, float, float, float]]]):
+    """Join lines that continue a block above them: aligned left edge, small gap, similar height."""
+    lines = sorted(lines, key=lambda r: (r[2][1], r[2][0]))
+    blocks: list[list] = []
+    for text, conf, (x1, y1, x2, y2) in lines:
+        h = y2 - y1
+        best = None
+        for block in blocks:
+            bx1, by1, bx2, by2 = block[2]
+            bh = block[3]
+            gap = y1 - by2
+            if abs(x1 - bx1) < 0.6 * bh and -0.2 * bh < gap < 0.8 * bh and 0.7 < h / max(bh, 1) < 1.4:
+                if best is None or gap < best[0]:
+                    best = (gap, block)
+        if best is not None:
+            block = best[1]
+            bx1, by1, bx2, by2 = block[2]
+            block[0] = f"{block[0]} {text}"
+            block[1] = min(block[1], conf)
+            block[2] = (min(bx1, x1), by1, max(bx2, x2), y2)
+            block[3] = h
+            continue
+        blocks.append([text, conf, (x1, y1, x2, y2), h])
+    return [(t, c, b) for t, c, b, _ in blocks]
 
 
 def near_field(screen: Screen, items: list[Item], radius_pt: float = 160) -> list[str]:
@@ -396,6 +426,36 @@ def compose_text(writer: anthropic.Anthropic, goal: str, screen: Screen, items: 
     return data["text"].strip() if data["fill"] else ""
 
 
+def compose_url(writer: anthropic.Anthropic, goal: str, history: list[str]) -> str:
+    """Ask the writing model which URL to open for this goal. Empty means no sensible site."""
+    response = writer.messages.create(
+        model=WRITER_MODEL,
+        max_tokens=200,
+        system=(
+            "Given a user's goal for their web browser, give the single best https URL to open first. "
+            "Prefer the site's homepage or the most direct public page. If no website is implied, set ok to false."
+        ),
+        messages=[{"role": "user", "content": json.dumps({"goal": goal, "previous_actions": history[-8:]})}],
+        output_config={
+            "format": {
+                "type": "json_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}, "url": {"type": "string"}, "reason": {"type": "string"}},
+                    "required": ["ok", "url", "reason"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+    )
+    data = json.loads("".join(b.text for b in response.content if b.type == "text"))
+    url = data["url"].strip() if data["ok"] else ""
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or "." not in parsed.netloc or any(ch.isspace() for ch in url):
+        return ""
+    return url
+
+
 def verify_typed(client: TypeSafeClient, goal: str, field_before: Field, typed: str) -> float:
     """Noul: probability that the field now holds a sensible value for its purpose."""
     after = focused_field()
@@ -436,9 +496,9 @@ def perform(key: str, site_key: str, screen: Screen, items: list[Item], email: s
         activate(BROWSER)
         return f"activated {BROWSER}"
     if key == "open_site":
-        url = SITES.get(site_key)
+        url = SITES.get(site_key) or (compose_url(writer, goal, history) if writer else "")
         if not url:
-            return "open_site chosen but no site selected"
+            return "open_site refused: no known site matches and no writer available to propose a URL"
         open_url(url)
         return f"opened {url}"
     if key == "press_enter":
@@ -507,7 +567,7 @@ def top(answer, n: int = 5) -> list[tuple[str, float]]:
 # --------------------------------------------------------------------------- loop
 
 
-def run_step(args, typesafe: TypeSafeClient, writer, step: int, history: list[str], email: str | None) -> bool:
+def run_step(args, typesafe: TypeSafeClient, writer, step: int, history: list[str], email: str | None, noops: list[int]) -> bool:
     check_abort()
     screen = capture(args.image, args.app)
     screen.image.save(args.out / f"step-{step:02d}-raw.png")
@@ -554,6 +614,13 @@ def run_step(args, typesafe: TypeSafeClient, writer, step: int, history: list[st
     what = perform(chosen, site.choice, screen, items, email, (typesafe, writer, args.goal, history))
     history.append(what)
     print(f"  did: {what}")
+    if "refused" in what or what == "waited":
+        noops[0] += 1
+        if noops[0] >= 2:
+            print("  two consecutive no-ops; stopping")
+            return False
+    else:
+        noops[0] = 0
     sleep_watching(args.delay)
     return True
 
@@ -563,7 +630,7 @@ def main() -> None:
     parser.add_argument("goal", help="what you want done on this computer")
     parser.add_argument("--act", action="store_true", help="actually click/type (default: dry run)")
     parser.add_argument("--steps", type=int, default=12, help="max actions before stopping")
-    parser.add_argument("--min-confidence", type=float, default=0.5)
+    parser.add_argument("--min-confidence", type=float, default=0.4)
     parser.add_argument("--delay", type=float, default=2.0, help="seconds to wait after each action")
     parser.add_argument("--out", type=Path, default=Path("runs") / time.strftime("%Y%m%d-%H%M%S"))
     parser.add_argument("--json", action="store_true", help="dump OCR items, field, and probabilities per step")
@@ -582,10 +649,11 @@ def main() -> None:
             print("ANTHROPIC_API_KEY not set: type_text will refuse; type_email still works.")
 
     history: list[str] = []
+    noops = [0]
     try:
         with TypeSafeClient() as typesafe:
             for step in range(1, args.steps + 1):
-                if not run_step(args, typesafe, writer, step, history, email):
+                if not run_step(args, typesafe, writer, step, history, email, noops):
                     break
             else:
                 print(f"\nstopped after {args.steps} steps")
