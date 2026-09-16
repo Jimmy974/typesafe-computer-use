@@ -5,6 +5,7 @@ Screen OCR -> TypeSafe `Choice` -> mouse/keyboard action. macOS only.
 ```
 cd ~/Projects/typesafe-clicker
 export TYPESAFE_API_KEY=...          # or: export $(grep TYPESAFE_API_KEY path/to/.env)
+export ANTHROPIC_API_KEY=...         # optional; enables the type_text action (writer model)
 export CLICKER_EMAIL=you@example.com # optional; enables the type_email action
 
 uv run clicker.py "please get to launchdarkly and log me in"          # dry run: one step, no input
@@ -21,6 +22,15 @@ uv run clicker.py "goal" --image runs/<ts>/step-03-raw.png --app "Google Chrome"
 - It also stops on its own when the model answers `done` or `none`, when
   confidence drops under `--min-confidence` (0.5), or after `--steps`.
 
+## How a step is decided
+
+One TypeSafe request carries three Choices: `kind` (what sort of action, ten
+options), `item` (which OCR line, only used when kind is `click_item`), and
+`site` (which known website, only used for `open_site`). Splitting them keeps
+screen noise from diluting the action decision. State includes the frontmost
+app, the focused accessibility element (role, label, placeholder, value), the
+last eight actions, and every OCR line in reading order.
+
 ## Action space
 
 Every OCR line on screen is one option, keyed by its index. Alongside those,
@@ -35,8 +45,14 @@ a fixed set of deterministic actions is always offered:
 | `wait` | screen still loading |
 | `done`, `none` | stop |
 
-Add sites to `SITES` in `clicker.py`. Passwords are never typed; rely on
-Chrome's password manager or SSO buttons that OCR can see.
+Add sites to `SITES` in `clicker.py`. Passwords are never typed: the writer
+is told to decline credential fields, and it returns a structured
+`{fill: false}` for them. Rely on Chrome's password manager or SSO buttons
+that OCR can see.
+
+The classifier never generates text. Free text exists only through
+`type_text`, where the writer sees a small packet: goal, recent actions, the
+focused field's label and placeholder, and the OCR lines near the field.
 
 ## Permissions
 

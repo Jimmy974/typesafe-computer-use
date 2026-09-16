@@ -1,12 +1,14 @@
-"""Screen OCR -> TypeSafe Choice -> mouse / keyboard action.
+"""Screen state -> TypeSafe Choice -> mouse / keyboard action.
 
 Each step:
   1. screencapture the main display
   2. Apple Vision OCR (via ocrmac) yields text lines + pixel bounding boxes
-  3. one TypeSafe Choice: every OCR line is an option keyed by index, plus a
-     fixed set of deterministic actions (switch app, open a known site, type
-     email, press enter, scroll, wait, done, none)
-  4. run the winning action; an OCR index clicks the center of that box
+  3. the accessibility API yields the focused element (role, label, value, frame)
+  4. one TypeSafe request with three Choices: what kind of action, which OCR
+     item (if clicking), which known site (if navigating)
+  5. run the winning action deterministically. Free text is the one exception:
+     `type_text` asks a small writing model for the string, types it, then a
+     TypeSafe Noul checks the field's new value before the loop continues.
 
 Dry-run by default. Pass --act to actually drive the machine.
 
@@ -24,19 +26,21 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
-import ApplicationServices
+import anthropic
+import ApplicationServices as AS
 import Quartz
 from ocrmac import ocrmac
 from PIL import Image, ImageDraw, ImageFont
-from typesafe_sdk import Choice, TypeSafeClient
+from typesafe_sdk import Choice, Noul, TypeSafeClient
 
 MIN_OCR_CONFIDENCE = 0.3
 MAX_OPTIONS = 255
 ABORT_CORNER_PX = 4
 BROWSER = "Google Chrome"
+WRITER_MODEL = os.environ.get("CLICKER_WRITER_MODEL", "claude-haiku-4-5")
 
 # Sites the "open_site" action can navigate to. Extend freely; keys are what
 # the classifier picks from, so keep them recognisable.
@@ -51,7 +55,8 @@ SITES = {
     "typesafe_console": "https://console.typesafe.ai/",
 }
 
-KEYCODES = {"return": 36, "tab": 48, "escape": 53, "l": 37}
+KEYCODES = {"return": 36, "tab": 48, "escape": 53, "a": 0, "delete": 51}
+TEXT_ROLES = {"AXTextField", "AXTextArea", "AXSearchField", "AXComboBox"}
 
 
 class Abort(Exception):
@@ -74,10 +79,37 @@ class Item:
 
 
 @dataclass(frozen=True)
+class Field:
+    """The focused accessibility element, in screen points."""
+
+    role: str
+    label: str
+    placeholder: str
+    value: str
+    x: float
+    y: float
+    w: float
+    h: float
+
+    @property
+    def is_text(self) -> bool:
+        return self.role in TEXT_ROLES
+
+    def summary(self) -> dict:
+        return {
+            "role": self.role,
+            "label": self.label,
+            "placeholder": self.placeholder,
+            "current_value": self.value[:200],
+        }
+
+
+@dataclass(frozen=True)
 class Screen:
     image: Image.Image
     scale: float  # physical pixels per point
     app: str
+    field: Field | None
 
     def region(self, item: Item) -> str:
         cx, cy = item.center
@@ -134,20 +166,63 @@ def type_text(text: str) -> None:
             post(ev)
 
 
+def clear_field() -> None:
+    press("a", command=True)
+    press("delete")
+
+
 def scroll(lines: int) -> None:
     post(Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitLine, 1, lines))
 
 
-def activate(app: str) -> None:
-    subprocess.run(["open", "-a", app], check=True)
+def osascript(script: str) -> str:
+    return subprocess.run(["osascript", "-e", script], capture_output=True, text=True, check=True).stdout.strip()
 
 
 def frontmost_app() -> str:
-    script = 'tell application "System Events" to get name of first application process whose frontmost is true'
-    return subprocess.run(["osascript", "-e", script], capture_output=True, text=True).stdout.strip()
+    return osascript('tell application "System Events" to get name of first application process whose frontmost is true')
+
+
+def activate(app: str, timeout: float = 3.0) -> None:
+    subprocess.run(["open", "-a", app], check=True)
+    end = time.monotonic() + timeout
+    while time.monotonic() < end and frontmost_app() != app:
+        time.sleep(0.1)
+
+
+def open_url(url: str) -> None:
+    osascript(f'tell application "{BROWSER}" to open location "{url}"')
+    activate(BROWSER)
 
 
 # --------------------------------------------------------------------------- perception
+
+
+def ax_attr(element, name: str):
+    err, value = AS.AXUIElementCopyAttributeValue(element, name, None)
+    return value if err == 0 else None
+
+
+def focused_field() -> Field | None:
+    system = AS.AXUIElementCreateSystemWide()
+    element = ax_attr(system, AS.kAXFocusedUIElementAttribute)
+    if element is None:
+        return None
+    pos = ax_attr(element, AS.kAXPositionAttribute)
+    size = ax_attr(element, AS.kAXSizeAttribute)
+    x = y = w = h = 0.0
+    if pos is not None and size is not None:
+        _, pt = AS.AXValueGetValue(pos, AS.kAXValueCGPointType, None)
+        _, sz = AS.AXValueGetValue(size, AS.kAXValueCGSizeType, None)
+        x, y, w, h = pt.x, pt.y, sz.width, sz.height
+    value = ax_attr(element, AS.kAXValueAttribute)
+    return Field(
+        role=str(ax_attr(element, AS.kAXRoleAttribute) or ""),
+        label=str(ax_attr(element, AS.kAXTitleAttribute) or ax_attr(element, AS.kAXDescriptionAttribute) or ""),
+        placeholder=str(ax_attr(element, AS.kAXPlaceholderValueAttribute) or ""),
+        value=value if isinstance(value, str) else "",
+        x=x, y=y, w=w, h=h,
+    )
 
 
 def capture(image_path: Path | None = None, app: str | None = None) -> Screen:
@@ -156,7 +231,12 @@ def capture(image_path: Path | None = None, app: str | None = None) -> Screen:
         subprocess.run(["screencapture", "-x", "-D", "1", str(image_path)], check=True, capture_output=True)
     image = Image.open(image_path).convert("RGB")
     points_wide = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID()).size.width
-    return Screen(image=image, scale=image.width / points_wide, app=app or frontmost_app())
+    return Screen(
+        image=image,
+        scale=image.width / points_wide,
+        app=app or frontmost_app(),
+        field=None if image_path and app else focused_field(),
+    )
 
 
 def ocr(screen: Screen, budget: int, goal: str) -> list[Item]:
@@ -173,7 +253,20 @@ def ocr(screen: Screen, budget: int, goal: str) -> list[Item]:
     return [Item(i, t, c, *b) for i, (t, c, b) in enumerate(kept[:budget])]
 
 
-# --------------------------------------------------------------------------- actions
+def near_field(screen: Screen, items: list[Item], radius_pt: float = 160) -> list[str]:
+    f = screen.field
+    if f is None:
+        return []
+    out = []
+    for it in items:
+        cx, cy = it.center
+        cx, cy = cx / screen.scale, cy / screen.scale
+        if abs(cx - (f.x + f.w / 2)) < radius_pt + f.w / 2 and abs(cy - (f.y + f.h / 2)) < radius_pt:
+            out.append(it.text)
+    return out
+
+
+# --------------------------------------------------------------------------- decisions
 
 
 def fixed_actions(email: str | None) -> dict[str, str]:
@@ -186,6 +279,10 @@ def fixed_actions(email: str | None) -> dict[str, str]:
             "Navigate the browser to a known website (chosen in the follow-up question). "
             "This is the only way to go to a site: never click the address bar, a URL, or a search box to get there."
         ),
+        "type_text": (
+            "Type free text into the focused text field. A writing model composes the text from the "
+            "goal and the field's label. Only valid when a text field is focused and needs content."
+        ),
         "press_enter": "Press Return to submit the focused form or field.",
         "press_escape": "Press Escape to dismiss a dialog, menu, or popup.",
         "scroll_down": "Scroll down to reveal more of the page.",
@@ -195,21 +292,28 @@ def fixed_actions(email: str | None) -> dict[str, str]:
         "none": "Nothing on screen or in this list helps with the goal.",
     }
     if email:
-        actions["type_email"] = "Type the user's email address into the currently focused text field."
+        actions["type_email"] = (
+            "Type the user's email address into the focused text field. Use this, not type_text, "
+            "whenever the field wants an email or username."
+        )
     return actions
 
 
-def decide(client: TypeSafeClient, goal: str, screen: Screen, items: list[Item], history: list[str], email: str | None):
-    kinds = {"click_item": "Click one of the on-screen text items (chosen in the item question)."}
-    kinds.update(fixed_actions(email))
-    state = {
+def base_state(goal: str, screen: Screen, items: list[Item], history: list[str]) -> dict:
+    return {
         "goal": goal,
         "frontmost_app": screen.app,
+        "focused_field": screen.field.summary() if screen.field else None,
         "previous_actions": history[-8:],
         "screen_text_in_reading_order": [
             {"i": it.index, "text": it.text, "where": screen.region(it)} for it in items
         ],
     }
+
+
+def decide(client: TypeSafeClient, goal: str, screen: Screen, items: list[Item], history: list[str], email: str | None):
+    kinds = {"click_item": "Click one of the on-screen text items (chosen in the item question)."}
+    kinds.update(fixed_actions(email))
     questions = {
         "kind": Choice(
             instructions=(
@@ -229,12 +333,81 @@ def decide(client: TypeSafeClient, goal: str, screen: Screen, items: list[Item],
             instructions="If clicking an on-screen item is the right move, which item?",
             criteria={str(it.index): f"{it.text!r} ({screen.region(it)})" for it in items},
         )
-    answers = client.system_one(state=state, questions=questions).answers
+    answers = client.system_one(state=base_state(goal, screen, items, history), questions=questions).answers
     return answers["kind"], answers.get("item"), answers["site"]
 
 
-def perform(key: str, site_key: str, screen: Screen, items: list[Item], email: str | None) -> str:
+def compose_text(writer: anthropic.Anthropic, goal: str, screen: Screen, items: list[Item], history: list[str]) -> str:
+    """Ask the writing model for the exact string to type into the focused field. Empty means decline."""
+    packet = {
+        "goal": goal,
+        "frontmost_app": screen.app,
+        "previous_actions": history[-8:],
+        "focused_field": screen.field.summary() if screen.field else None,
+        "text_near_field": near_field(screen, items),
+        "all_screen_text": [it.text for it in items][:120],
+    }
+    response = writer.messages.create(
+        model=WRITER_MODEL,
+        max_tokens=256,
+        system=(
+            "You fill in one text field on a user's screen. You receive the user's goal, recent "
+            "actions, the focused field's label and placeholder, and nearby screen text. Decide the "
+            "exact string to type. Never invent credentials, passwords, or personal data; for such "
+            "fields, or when the field should not be filled, set fill to false."
+        ),
+        messages=[{"role": "user", "content": json.dumps(packet)}],
+        output_config={
+            "format": {
+                "type": "json_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "fill": {"type": "boolean"},
+                        "text": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["fill", "text", "reason"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+    )
+    raw = "".join(b.text for b in response.content if b.type == "text")
+    data = json.loads(raw)
+    return data["text"].strip() if data["fill"] else ""
+
+
+def verify_typed(client: TypeSafeClient, goal: str, field_before: Field, typed: str) -> float:
+    """Noul: probability that the field now holds a sensible value for its purpose."""
+    after = focused_field()
+    state = {
+        "goal": goal,
+        "field": field_before.summary(),
+        "text_typed": typed,
+        "field_value_now": after.value[:300] if after else None,
+        "field_still_focused": bool(after and after.role == field_before.role and after.label == field_before.label),
+    }
+    answer = client.system_one(
+        state=state,
+        questions={
+            "ok": Noul(
+                instructions=(
+                    "Did the typing succeed: does the field now contain the typed text, and is that "
+                    "text a sensible value for what this field asks for, given the goal?"
+                ),
+            )
+        },
+    ).answers["ok"]
+    return answer.noul
+
+
+# --------------------------------------------------------------------------- actions
+
+
+def perform(key: str, site_key: str, screen: Screen, items: list[Item], email: str | None, clients) -> str:
     """Execute one action and return a short description for the history."""
+    typesafe, writer, goal, history = clients
     by_index = {str(it.index): it for it in items}
     if key in by_index:
         it = by_index[key]
@@ -248,12 +421,7 @@ def perform(key: str, site_key: str, screen: Screen, items: list[Item], email: s
         url = SITES.get(site_key)
         if not url:
             return "open_site chosen but no site selected"
-        activate(BROWSER)
-        time.sleep(0.6)
-        press("l", command=True)
-        time.sleep(0.2)
-        type_text(url)
-        press("return")
+        open_url(url)
         return f"opened {url}"
     if key == "press_enter":
         press("return")
@@ -268,8 +436,25 @@ def perform(key: str, site_key: str, screen: Screen, items: list[Item], email: s
         scroll(10)
         return "scrolled up"
     if key == "type_email" and email:
+        if not (screen.field and screen.field.is_text):
+            return "type_email refused: no text field is focused"
         type_text(email)
         return "typed email"
+    if key == "type_text":
+        if not (screen.field and screen.field.is_text):
+            return "type_text refused: no text field is focused"
+        if writer is None:
+            return "type_text refused: ANTHROPIC_API_KEY not set"
+        text = compose_text(writer, goal, screen, items, history)
+        if not text:
+            return "type_text: writer declined to fill this field"
+        type_text(text)
+        time.sleep(0.3)
+        p = verify_typed(typesafe, goal, screen.field, text)
+        if p < 0.5:
+            clear_field()
+            return f"typed {text!r} into {screen.field.label!r} but verification failed ({p:.2f}); cleared it"
+        return f"typed {text!r} into {screen.field.label!r} (verified {p:.2f})"
     if key == "wait":
         return "waited"
     raise ValueError(key)
@@ -290,6 +475,10 @@ def annotate(screen: Screen, items: list[Item], chosen: str, out: Path) -> None:
         color = (255, 0, 0) if hit else (0, 160, 255)
         draw.rectangle((it.x1, it.y1, it.x2, it.y2), outline=color, width=3 if hit else 1)
         draw.text((it.x1, max(0, it.y1 - 12 * screen.scale)), str(it.index), fill=color, font=font)
+    f = screen.field
+    if f is not None:
+        s = screen.scale
+        draw.rectangle((f.x * s, f.y * s, (f.x + f.w) * s, (f.y + f.h) * s), outline=(0, 200, 0), width=3)
     im.save(out)
 
 
@@ -300,13 +489,13 @@ def top(answer, n: int = 5) -> list[tuple[str, float]]:
 # --------------------------------------------------------------------------- loop
 
 
-def run_step(args, client: TypeSafeClient, step: int, history: list[str], email: str | None) -> bool:
+def run_step(args, typesafe: TypeSafeClient, writer, step: int, history: list[str], email: str | None) -> bool:
     check_abort()
     screen = capture(args.image, args.app)
     screen.image.save(args.out / f"step-{step:02d}-raw.png")
     items = ocr(screen, MAX_OPTIONS, args.goal)
 
-    kind, item, site = decide(client, args.goal, screen, items, history, email)
+    kind, item, site = decide(typesafe, args.goal, screen, items, history, email)
     by_index = {str(it.index): it for it in items}
     clicking = kind.choice == "click_item" and item is not None
     chosen = item.choice if clicking else kind.choice
@@ -315,7 +504,8 @@ def run_step(args, client: TypeSafeClient, step: int, history: list[str], email:
     out = args.out / f"step-{step:02d}.png"
     annotate(screen, items, chosen, out)
 
-    print(f"\nstep {step}: app={screen.app!r} items={len(items)} kind={kind.choice} ({kind.confidence:.2f}) site={site.choice}")
+    field = f" field={screen.field.role}:{screen.field.label!r}" if screen.field else ""
+    print(f"\nstep {step}: app={screen.app!r}{field} items={len(items)} kind={kind.choice} ({kind.confidence:.2f}) site={site.choice}")
     for key, p in top(kind, 4):
         print(f"  {p:5.2f}  {key}")
     if item is not None:
@@ -325,7 +515,8 @@ def run_step(args, client: TypeSafeClient, step: int, history: list[str], email:
     print(f"  annotated: {out}")
     if args.json:
         out.with_suffix(".json").write_text(json.dumps({
-            "items": [it.__dict__ for it in items],
+            "items": [asdict(it) for it in items],
+            "field": asdict(screen.field) if screen.field else None,
             "kind": kind.choice, "kind_probabilities": kind.probabilities,
             "item": item.choice if item else None,
             "item_probabilities": item.probabilities if item else None,
@@ -342,7 +533,7 @@ def run_step(args, client: TypeSafeClient, step: int, history: list[str], email:
         print(f"  would do: {chosen}. dry run (pass --act without --image to drive the machine)")
         return False
 
-    what = perform(chosen, site.choice, screen, items, email)
+    what = perform(chosen, site.choice, screen, items, email, (typesafe, writer, args.goal, history))
     history.append(what)
     print(f"  did: {what}")
     sleep_watching(args.delay)
@@ -357,23 +548,26 @@ def main() -> None:
     parser.add_argument("--min-confidence", type=float, default=0.5)
     parser.add_argument("--delay", type=float, default=2.0, help="seconds to wait after each action")
     parser.add_argument("--out", type=Path, default=Path("runs") / time.strftime("%Y%m%d-%H%M%S"))
-    parser.add_argument("--json", action="store_true", help="dump OCR items + probabilities per step")
+    parser.add_argument("--json", action="store_true", help="dump OCR items, field, and probabilities per step")
     parser.add_argument("--image", type=Path, help="replay against a saved screenshot instead of capturing (never acts)")
     parser.add_argument("--app", help="frontmost app name to report to the model (for --image replays)")
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
     email = os.environ.get("CLICKER_EMAIL")
-    if args.act and not ApplicationServices.AXIsProcessTrusted():
+    writer = anthropic.Anthropic() if os.environ.get("ANTHROPIC_API_KEY") else None
+    if args.act and not AS.AXIsProcessTrusted():
         sys.exit("this terminal lacks Accessibility permission; grant it in System Settings > Privacy & Security")
     if args.act:
         print("driving the machine. abort: Ctrl-C, or slam the mouse into the top-left corner.")
+        if writer is None:
+            print("ANTHROPIC_API_KEY not set: type_text will refuse; type_email still works.")
 
     history: list[str] = []
     try:
-        with TypeSafeClient() as client:
+        with TypeSafeClient() as typesafe:
             for step in range(1, args.steps + 1):
-                if not run_step(args, client, step, history, email):
+                if not run_step(args, typesafe, writer, step, history, email):
                     break
             else:
                 print(f"\nstopped after {args.steps} steps")

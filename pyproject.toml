@@ -3,6 +3,7 @@ name = "typesafe-clicker"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
+    "anthropic==1.6.0",
     "ocrmac==1.0.1",
     "pyobjc-framework-applicationservices==12.2.2",
     "pyobjc-framework-quartz==12.2.2",
