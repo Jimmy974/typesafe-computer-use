@@ -8,9 +8,10 @@ consulted when free text must be produced.
 cd ~/Projects/typesafe-clicker
 uv sync
 
-export TYPESAFE_API_KEY=...            # required
-export ANTHROPIC_API_KEY=...           # optional: enables type_text and writer-proposed URLs
-export CLICKER_EMAIL=you@example.com   # optional: enables type_email
+cp .env.example .env                   # then fill it in; or export the same variables
+# TYPESAFE_API_KEY   required
+# ANTHROPIC_API_KEY  optional: enables type_text and writer-proposed URLs
+# CLICKER_EMAIL      optional: enables type_email
 
 uv run clicker.py "go to cnn and click onto something related to AI on the homepage"        # dry run
 uv run clicker.py "go to cnn and click onto something related to AI on the homepage" --act  # drives the machine

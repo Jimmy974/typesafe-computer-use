@@ -678,7 +678,29 @@ def run_step(args, typesafe: TypeSafeClient, writer, step: int, history: list[st
     return True
 
 
+def load_dotenv(path: Path) -> None:
+    """Set KEY=VALUE lines from a .env file into the environment unless already set."""
+    if not path.is_file():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+
+
+def make_writer():
+    try:
+        return anthropic.Anthropic()
+    except anthropic.AnthropicError as e:
+        log(f"writer disabled: {e}")
+        log("  set ANTHROPIC_API_KEY (env or .env next to clicker.py); type_text and writer-proposed URLs need it")
+        return None
+
+
 def main() -> None:
+    load_dotenv(Path(__file__).with_name(".env"))
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("goal", help="what you want done on this computer")
     parser.add_argument("--act", action="store_true", help="actually click/type (default: dry run)")
@@ -695,13 +717,13 @@ def main() -> None:
     log(f"run folder: {args.out}")
 
     email = os.environ.get("CLICKER_EMAIL")
-    writer = anthropic.Anthropic() if os.environ.get("ANTHROPIC_API_KEY") else None
+    writer = make_writer()
+    if not os.environ.get("TYPESAFE_API_KEY"):
+        sys.exit("TYPESAFE_API_KEY is not set (env or .env next to clicker.py)")
     if args.act and not AS.AXIsProcessTrusted():
         sys.exit("this terminal lacks Accessibility permission; grant it in System Settings > Privacy & Security")
     if args.act:
         log("driving the machine. abort: Ctrl-C, or slam the mouse into the top-left corner.")
-        if writer is None:
-            log("ANTHROPIC_API_KEY not set: type_text will refuse; type_email still works.")
 
     history: list[str] = []
     noops = [0]
