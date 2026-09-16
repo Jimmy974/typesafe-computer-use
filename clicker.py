@@ -111,6 +111,7 @@ class Screen:
     scale: float  # physical pixels per point
     app: str
     field: Field | None
+    url: str | None
 
     def region(self, item: Item) -> str:
         cx, cy = item.center
@@ -202,16 +203,29 @@ def frontmost_app() -> str:
     return osascript('tell application "System Events" to get name of first application process whose frontmost is true')
 
 
-def activate(app: str, timeout: float = 3.0) -> None:
-    subprocess.run(["open", "-a", app], check=True)
+def activate(app: str, timeout: float = 3.0) -> bool:
+    """Bring an app to the front and confirm it got there."""
+    osascript(f'tell application "{app}" to activate')
     end = time.monotonic() + timeout
-    while time.monotonic() < end and frontmost_app() != app:
+    while time.monotonic() < end:
+        if frontmost_app() == app:
+            return True
         time.sleep(0.1)
+    osascript(f'tell application "System Events" to set frontmost of process "{app}" to true')
+    time.sleep(0.3)
+    return frontmost_app() == app
 
 
-def open_url(url: str) -> None:
+def open_url(url: str) -> bool:
     osascript(f'tell application "{BROWSER}" to open location "{url}"')
-    activate(BROWSER)
+    return activate(BROWSER)
+
+
+def browser_url() -> str | None:
+    try:
+        return osascript(f'tell application "{BROWSER}" to get URL of active tab of front window') or None
+    except subprocess.CalledProcessError:
+        return None
 
 
 # --------------------------------------------------------------------------- perception
@@ -255,6 +269,7 @@ def capture(image_path: Path | None = None, app: str | None = None) -> Screen:
         scale=image.width / points_wide,
         app=app or frontmost_app(),
         field=None if image_path and app else focused_field(),
+        url=None if image_path and app else browser_url(),
     )
 
 
@@ -351,6 +366,7 @@ def base_state(goal: str, screen: Screen, items: list[Item], history: list[str])
     return {
         "goal": goal,
         "frontmost_app": screen.app,
+        "browser_active_tab_url": screen.url,
         "focused_field": screen.field.summary() if screen.field else None,
         "previous_actions": history[-8:],
         "screen_text_in_reading_order": [
@@ -493,14 +509,12 @@ def perform(key: str, site_key: str, screen: Screen, items: list[Item], email: s
         click_at((cx / screen.scale, cy / screen.scale))
         return f"clicked {it.text!r}"
     if key == "switch_to_browser":
-        activate(BROWSER)
-        return f"activated {BROWSER}"
+        return f"activated {BROWSER}" if activate(BROWSER) else f"switch_to_browser failed: {BROWSER} did not come to the front"
     if key == "open_site":
         url = SITES.get(site_key) or (compose_url(writer, goal, history) if writer else "")
         if not url:
             return "open_site refused: no known site matches and no writer available to propose a URL"
-        open_url(url)
-        return f"opened {url}"
+        return f"opened {url}" if open_url(url) else f"open_site failed: opened {url} but {BROWSER} did not come to the front"
     if key == "press_enter":
         press("return")
         return "pressed Return"
@@ -614,7 +628,7 @@ def run_step(args, typesafe: TypeSafeClient, writer, step: int, history: list[st
     what = perform(chosen, site.choice, screen, items, email, (typesafe, writer, args.goal, history))
     history.append(what)
     print(f"  did: {what}")
-    if "refused" in what or what == "waited":
+    if "refused" in what or "failed" in what or what == "waited":
         noops[0] += 1
         if noops[0] >= 2:
             print("  two consecutive no-ops; stopping")
