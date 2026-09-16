@@ -159,9 +159,14 @@ def capture(image_path: Path | None = None, app: str | None = None) -> Screen:
     return Screen(image=image, scale=image.width / points_wide, app=app or frontmost_app())
 
 
-def ocr(screen: Screen, budget: int) -> list[Item]:
+def ocr(screen: Screen, budget: int, goal: str) -> list[Item]:
     raw = ocrmac.OCR(screen.image, recognition_level="accurate").recognize(px=True)
-    kept = [(t.strip(), c, b) for t, c, b in raw if t.strip() and c >= MIN_OCR_CONFIDENCE]
+    needle = " ".join(goal.lower().split())
+    kept = [
+        (t.strip(), c, b)
+        for t, c, b in raw
+        if t.strip() and c >= MIN_OCR_CONFIDENCE and needle not in " ".join(t.lower().split())
+    ]
     heights = sorted(b[3] - b[1] for _, _, b in kept) or [1.0]
     row_h = max(1.0, heights[len(heights) // 2])
     kept.sort(key=lambda r: (round((r[2][1] + r[2][3]) / 2 / row_h), r[2][0]))
@@ -195,8 +200,8 @@ def fixed_actions(email: str | None) -> dict[str, str]:
 
 
 def decide(client: TypeSafeClient, goal: str, screen: Screen, items: list[Item], history: list[str], email: str | None):
-    criteria = {str(it.index): f"click {it.text!r} ({screen.region(it)})" for it in items}
-    criteria.update(fixed_actions(email))
+    kinds = {"click_item": "Click one of the on-screen text items (chosen in the item question)."}
+    kinds.update(fixed_actions(email))
     state = {
         "goal": goal,
         "frontmost_app": screen.app,
@@ -205,26 +210,27 @@ def decide(client: TypeSafeClient, goal: str, screen: Screen, items: list[Item],
             {"i": it.index, "text": it.text, "where": screen.region(it)} for it in items
         ],
     }
-    response = client.system_one(
-        state=state,
-        questions={
-            "action": Choice(
-                instructions=(
-                    "You are driving this computer one action at a time. Which single action "
-                    "makes the most progress toward the goal right now? Click an on-screen item "
-                    "when one clearly fits; use a fixed action when the goal needs something the "
-                    "screen does not offer. Do not repeat an action that was just taken unless "
-                    "the screen changed."
-                ),
-                criteria=criteria,
+    questions = {
+        "kind": Choice(
+            instructions=(
+                "You are driving this computer one action at a time. Which kind of action "
+                "makes the most progress toward the goal right now? Do not repeat an action "
+                "that was just taken unless the screen changed."
             ),
-            "site": Choice(
-                instructions="If a website must be opened to progress the goal, which one?",
-                criteria={**SITES, "none": "No website is needed."},
-            ),
-        },
-    )
-    return response.answers["action"], response.answers["site"]
+            criteria=kinds,
+        ),
+        "site": Choice(
+            instructions="If a website must be opened to progress the goal, which one?",
+            criteria={**SITES, "none": "No website is needed."},
+        ),
+    }
+    if items:
+        questions["item"] = Choice(
+            instructions="If clicking an on-screen item is the right move, which item?",
+            criteria={str(it.index): f"{it.text!r} ({screen.region(it)})" for it in items},
+        )
+    answers = client.system_one(state=state, questions=questions).answers
+    return answers["kind"], answers.get("item"), answers["site"]
 
 
 def perform(key: str, site_key: str, screen: Screen, items: list[Item], email: str | None) -> str:
@@ -298,36 +304,45 @@ def run_step(args, client: TypeSafeClient, step: int, history: list[str], email:
     check_abort()
     screen = capture(args.image, args.app)
     screen.image.save(args.out / f"step-{step:02d}-raw.png")
-    items = ocr(screen, MAX_OPTIONS - len(fixed_actions(email)))
+    items = ocr(screen, MAX_OPTIONS, args.goal)
 
-    action, site = decide(client, args.goal, screen, items, history, email)
+    kind, item, site = decide(client, args.goal, screen, items, history, email)
     by_index = {str(it.index): it for it in items}
-    out = args.out / f"step-{step:02d}.png"
-    annotate(screen, items, action.choice, out)
+    clicking = kind.choice == "click_item" and item is not None
+    chosen = item.choice if clicking else kind.choice
+    confidence = min(kind.confidence, item.confidence) if clicking else kind.confidence
 
-    print(f"\nstep {step}: app={screen.app!r} items={len(items)} action={action.choice} conf={action.confidence:.2f} site={site.choice}")
-    for key, p in top(action):
-        label = f"click {by_index[key].text!r}" if key in by_index else key
-        print(f"  {p:5.2f}  [{key}] {label}")
+    out = args.out / f"step-{step:02d}.png"
+    annotate(screen, items, chosen, out)
+
+    print(f"\nstep {step}: app={screen.app!r} items={len(items)} kind={kind.choice} ({kind.confidence:.2f}) site={site.choice}")
+    for key, p in top(kind, 4):
+        print(f"  {p:5.2f}  {key}")
+    if item is not None:
+        print(f"  item ({item.confidence:.2f}):")
+        for key, p in top(item, 4):
+            print(f"  {p:5.2f}  [{key}] {by_index[key].text!r}")
     print(f"  annotated: {out}")
     if args.json:
         out.with_suffix(".json").write_text(json.dumps({
             "items": [it.__dict__ for it in items],
-            "action": action.choice, "confidence": action.confidence,
-            "probabilities": action.probabilities, "site": site.choice,
+            "kind": kind.choice, "kind_probabilities": kind.probabilities,
+            "item": item.choice if item else None,
+            "item_probabilities": item.probabilities if item else None,
+            "site": site.choice,
         }, indent=2))
 
-    if action.choice in ("done", "none"):
-        print(f"  model says {action.choice!r}; stopping")
+    if kind.choice in ("done", "none"):
+        print(f"  model says {kind.choice!r}; stopping")
         return False
-    if action.confidence < args.min_confidence:
-        print(f"  confidence below {args.min_confidence}; stopping")
+    if confidence < args.min_confidence:
+        print(f"  confidence {confidence:.2f} below {args.min_confidence}; stopping")
         return False
     if not args.act or args.image:
-        print("  dry run (pass --act without --image to drive the machine)")
+        print(f"  would do: {chosen}. dry run (pass --act without --image to drive the machine)")
         return False
 
-    what = perform(action.choice, site.choice, screen, items, email)
+    what = perform(chosen, site.choice, screen, items, email)
     history.append(what)
     print(f"  did: {what}")
     sleep_watching(args.delay)
