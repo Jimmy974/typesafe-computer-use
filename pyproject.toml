@@ -1,5 +1,5 @@
 [project]
-name = "typesafe-clicker"
+name = "typesafe-computer-use"
 version = "0.1.0"
 description = "Cheap, fast computer use on macOS: deterministic screen state, a TypeSafe classifier for every decision, a writer model only for free text."
 readme = "README.md"
@@ -27,12 +27,12 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/awlevin/typesafe-clicker"
-Issues = "https://github.com/awlevin/typesafe-clicker/issues"
+Homepage = "https://github.com/awlevin/typesafe-computer-use"
+Issues = "https://github.com/awlevin/typesafe-computer-use/issues"
 
 [project.scripts]
-clicker = "typesafe_clicker.cli:main"
-clicker-inspect = "typesafe_clicker.cli:inspect"
+clicker = "typesafe_computer_use.cli:main"
+clicker-inspect = "typesafe_computer_use.cli:inspect"
 
 [dependency-groups]
 dev = ["pytest==9.1.1", "ruff==0.16.8"]
@@ -42,7 +42,7 @@ requires = ["hatchling==1.32.1"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["typesafe_clicker"]
+packages = ["typesafe_computer_use"]
 
 [tool.ruff]
 line-length = 130

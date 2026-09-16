@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from typesafe_clicker.models import Item, Screen
+from typesafe_computer_use.models import Item, Screen
 
 
 @pytest.fixture

@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from typesafe_clicker.decide import Decision, base_state, item_criteria, kind_criteria
+from typesafe_computer_use.decide import Decision, base_state, item_criteria, kind_criteria
 
 
 def answer(choice, confidence, probabilities=None):

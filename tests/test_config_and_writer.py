@@ -1,7 +1,7 @@
 import os
 
-from typesafe_clicker.config import load_dotenv
-from typesafe_clicker.writer import valid_url
+from typesafe_computer_use.config import load_dotenv
+from typesafe_computer_use.writer import valid_url
 
 
 def test_dotenv_sets_only_missing_keys(tmp_path, monkeypatch):

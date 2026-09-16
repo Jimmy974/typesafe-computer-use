@@ -674,7 +674,7 @@ wheels = [
 ]
 
 [[package]]
-name = "typesafe-clicker"
+name = "typesafe-computer-use"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="docs/banner.svg" alt="typesafe-clicker" width="100%">
+  <img src="docs/banner.svg" alt="typesafe-computer-use" width="100%">
 </p>
 
 <p align="center">
-  <a href="https://github.com/awlevin/typesafe-clicker/actions/workflows/ci.yaml"><img alt="CI" src="https://github.com/awlevin/typesafe-clicker/actions/workflows/ci.yaml/badge.svg"></a>
+  <a href="https://github.com/awlevin/typesafe-computer-use/actions/workflows/ci.yaml"><img alt="CI" src="https://github.com/awlevin/typesafe-computer-use/actions/workflows/ci.yaml/badge.svg"></a>
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
   <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white">
   <img alt="macOS" src="https://img.shields.io/badge/platform-macOS-000000?logo=apple&logoColor=white">
@@ -11,7 +11,7 @@
   <a href="https://github.com/astral-sh/ruff"><img alt="Ruff" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json"></a>
 </p>
 
-**typesafe-clicker** drives a Mac toward a goal you type in plain English, for about a
+**typesafe-computer-use** drives a Mac toward a goal you type in plain English, for about a
 fiftieth of a cent per step. It never sends a screenshot to a big model. Instead it
 reads the screen deterministically, asks a small classifier which action comes next,
 and only calls a writing model when a text field genuinely needs free text.
@@ -51,8 +51,8 @@ reasoning the frontier model does for free has to be rebuilt here as determinist
 macOS 14 or newer, Python 3.12 or newer, [uv](https://docs.astral.sh/uv/).
 
 ```
-git clone https://github.com/awlevin/typesafe-clicker
-cd typesafe-clicker
+git clone https://github.com/awlevin/typesafe-computer-use
+cd typesafe-computer-use
 uv sync
 cp .env.example .env     # fill in the keys
 ```
@@ -163,7 +163,7 @@ uv run clicker "same goal" --image runs/<ts>/step-03-raw.png --app "Google Chrom
 ## Layout
 
 ```
-typesafe_clicker/
+typesafe_computer_use/
   macos.py        the only module that touches Quartz, AX, AppleScript   (platform adapter)
   perception.py   capture, OCR, block merging, goal-echo filter
   dates.py        date parsing and "in N days" hints

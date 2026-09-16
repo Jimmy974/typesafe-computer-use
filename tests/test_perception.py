@@ -1,4 +1,4 @@
-from typesafe_clicker.perception import goal_echoes, is_echo, merge_blocks, to_items
+from typesafe_computer_use.perception import goal_echoes, is_echo, merge_blocks, to_items
 
 
 def line(text, x1, y1, x2, y2, conf=1.0):
