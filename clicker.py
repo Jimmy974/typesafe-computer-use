@@ -691,12 +691,12 @@ def load_dotenv(path: Path) -> None:
 
 
 def make_writer():
-    try:
-        return anthropic.Anthropic()
-    except anthropic.AnthropicError as e:
-        log(f"writer disabled: {e}")
-        log("  set ANTHROPIC_API_KEY (env or .env next to clicker.py); type_text and writer-proposed URLs need it")
-        return None
+    client = anthropic.Anthropic()
+    if client.api_key or getattr(client, "auth_token", None):
+        return client
+    log("writer disabled: no Anthropic credentials found")
+    log("  set ANTHROPIC_API_KEY (env or .env next to clicker.py); type_text and writer-proposed URLs need it")
+    return None
 
 
 def main() -> None:
