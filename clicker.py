@@ -172,18 +172,17 @@ def clear_field() -> None:
 
 
 def frontmost_window_center() -> tuple[float, float] | None:
-    system = AS.AXUIElementCreateSystemWide()
-    app = ax_attr(system, AS.kAXFocusedApplicationAttribute)
-    window = ax_attr(app, AS.kAXFocusedWindowAttribute) if app is not None else None
-    if window is None:
-        return None
-    pos = ax_attr(window, AS.kAXPositionAttribute)
-    size = ax_attr(window, AS.kAXSizeAttribute)
-    if pos is None or size is None:
-        return None
-    _, pt = AS.AXValueGetValue(pos, AS.kAXValueCGPointType, None)
-    _, sz = AS.AXValueGetValue(size, AS.kAXValueCGSizeType, None)
-    return pt.x + sz.width / 2, pt.y + sz.height / 2
+    """Center of the frontmost app's topmost on-screen window, in points. Pure Quartz, no AX needed."""
+    pid = int(osascript('tell application "System Events" to get unix id of first application process whose frontmost is true'))
+    windows = Quartz.CGWindowListCopyWindowInfo(
+        Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements, Quartz.kCGNullWindowID
+    )
+    for w in windows or []:
+        if w.get("kCGWindowOwnerPID") == pid and w.get("kCGWindowLayer") == 0:
+            b = w["kCGWindowBounds"]
+            if b["Width"] > 50 and b["Height"] > 50:
+                return b["X"] + b["Width"] / 2, b["Y"] + b["Height"] / 2
+    return None
 
 
 def scroll(lines: int) -> None:
