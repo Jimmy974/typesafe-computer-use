@@ -171,7 +171,26 @@ def clear_field() -> None:
     press("delete")
 
 
+def frontmost_window_center() -> tuple[float, float] | None:
+    system = AS.AXUIElementCreateSystemWide()
+    app = ax_attr(system, AS.kAXFocusedApplicationAttribute)
+    window = ax_attr(app, AS.kAXFocusedWindowAttribute) if app is not None else None
+    if window is None:
+        return None
+    pos = ax_attr(window, AS.kAXPositionAttribute)
+    size = ax_attr(window, AS.kAXSizeAttribute)
+    if pos is None or size is None:
+        return None
+    _, pt = AS.AXValueGetValue(pos, AS.kAXValueCGPointType, None)
+    _, sz = AS.AXValueGetValue(size, AS.kAXValueCGSizeType, None)
+    return pt.x + sz.width / 2, pt.y + sz.height / 2
+
+
 def scroll(lines: int) -> None:
+    """Scroll events go to the view under the cursor, so park it over the frontmost window first."""
+    center = frontmost_window_center()
+    if center is not None:
+        post(Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, center, Quartz.kCGMouseButtonLeft))
     post(Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitLine, 1, lines))
 
 
