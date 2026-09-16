@@ -1,21 +1,54 @@
 # typesafe-clicker
 
-Screen OCR -> TypeSafe `Choice` -> mouse click. macOS only.
+Screen OCR -> TypeSafe `Choice` -> mouse/keyboard action. macOS only.
 
 ```
-uv sync
-export TYPESAFE_API_KEY=...
-uv run clicker.py "open the Settings menu"            # dry run, writes runs/<ts>/step-01.png
-uv run clicker.py "open the Settings menu" --click    # actually clicks
-uv run clicker.py "log in" --click --steps 5 --json   # multi-step loop
+cd ~/Projects/typesafe-clicker
+export TYPESAFE_API_KEY=...          # or: export $(grep TYPESAFE_API_KEY path/to/.env)
+export CLICKER_EMAIL=you@example.com # optional; enables the type_email action
+
+uv run clicker.py "please get to launchdarkly and log me in"          # dry run: one step, no input
+uv run clicker.py "please get to launchdarkly and log me in" --act    # drives the machine, up to 12 steps
+uv run clicker.py "goal" --act --steps 20 --delay 3 --json            # longer, slower, with per-step dumps
+uv run clicker.py "goal" --image runs/<ts>/step-03-raw.png --app "Google Chrome"   # replay a saved screen
 ```
 
-Permissions the terminal needs (System Settings > Privacy & Security):
+## Stopping it
+
+- Ctrl-C in the terminal, when the terminal has focus.
+- Slam the mouse into the top-left corner of the screen. Checked before every
+  step and every 100 ms during the post-action delay. Works from any app.
+- It also stops on its own when the model answers `done` or `none`, when
+  confidence drops under `--min-confidence` (0.5), or after `--steps`.
+
+## Action space
+
+Every OCR line on screen is one option, keyed by its index. Alongside those,
+a fixed set of deterministic actions is always offered:
+
+| key | does |
+|---|---|
+| `switch_to_browser` | `open -a "Google Chrome"` |
+| `open_site` | activate Chrome, Cmd-L, type the URL of the site picked by a second Choice over `SITES`, Return |
+| `type_email` | types `$CLICKER_EMAIL` (only offered when set) |
+| `press_enter`, `press_escape` | keyboard |
+| `scroll_down`, `scroll_up` | 10 lines |
+| `wait` | screen still loading |
+| `done`, `none` | stop |
+
+Add sites to `SITES` in `clicker.py`. Passwords are never typed; rely on
+Chrome's password manager or SSO buttons that OCR can see.
+
+## Permissions
+
+System Settings > Privacy & Security, for your terminal app:
 
 - Screen Recording, or `screencapture` returns only the wallpaper.
-- Accessibility, or the synthetic click is silently dropped.
+- Accessibility, or synthetic clicks and keystrokes are dropped. `--act`
+  refuses to start without it.
 
-How it works: every OCR line becomes one Choice option keyed by its index.
-The answer is an index plus a probability over every option plus a confidence.
-Below `--min-confidence` (default 0.5) nothing is clicked. The chosen box's
-center, divided by the Retina scale, is the click point.
+## Output
+
+Each run writes `runs/<timestamp>/step-NN-raw.png` (what the model saw) and
+`step-NN.png` (OCR boxes numbered, chosen box in red). `--json` adds the OCR
+items and the full probability distribution per step.
