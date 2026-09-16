@@ -67,3 +67,15 @@ System Settings > Privacy & Security, for your terminal app:
 Each run writes `runs/<timestamp>/step-NN-raw.png` (what the model saw) and
 `step-NN.png` (OCR boxes numbered, chosen box in red). `--json` adds the OCR
 items and the full probability distribution per step.
+
+## Inspecting what the model sees
+
+```
+uv run inspect_screen.py "your goal"     # 3-2-1 countdown, then capture
+```
+
+Opens two things: the screenshot with every OCR block outlined and numbered
+(green = focused field), and `state.txt` with the exact `state` and the three
+Choice criteria maps that would go to TypeSafe for that goal, followed by a
+per-block table of pixel boxes, click points, and confidences. Files land in
+`inspections/<timestamp>/`. Pass `--no-open` to only write them.
