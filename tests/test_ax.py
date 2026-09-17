@@ -252,3 +252,46 @@ def test_ax_refs_are_empty_without_an_accessibility_tree(screen, monkeypatch):
     monkeypatch.setattr(perception, "ocr", lambda screen, budget, goal, *_: [Item(0, "Only text", 0.9, 10.0, 10.0, 90.0, 40.0)])
     items = perception.perceive(screen, 255, "goal")
     assert [it.source for it in items] == ["ocr"] and screen.ax_refs == {}
+
+
+def test_a_subtree_repeated_under_several_parents_is_walked_once():
+    """Ghostty hangs its menu bar under every window: same role, label and frame, new objects each time."""
+    tree = {
+        "app": ["win1", "win2", "win3"],
+        "win1": ["bar1"],
+        "win2": ["bar2"],
+        "win3": ["bar3"],
+        "bar1": ["file1"],
+        "bar2": ["file2"],
+        "bar3": ["file3"],
+        "file1": [],
+        "file2": [],
+        "file3": [],
+    }
+    frames = {"app": None, "win1": (0, 40, 800, 600), "win2": (0, 40, 800, 600), "win3": (0, 40, 800, 600)}
+    for b in ("bar1", "bar2", "bar3"):
+        frames[b] = (0, 0, 800, 24)
+    for f in ("file1", "file2", "file3"):
+        frames[f] = (40, 0, 30, 24)
+    roles = {"app": "AXApplication", "win1": "AXWindow", "win2": "AXWindow", "win3": "AXWindow"}
+    labels = {"file1": "File", "file2": "File", "file3": "File"}
+
+    def attrs(n):
+        return AxAttrs(roles.get(n, "AXMenuBar" if n.startswith("bar") else "AXMenuBarItem"), labels.get(n, ""), frames[n])
+
+    found, _, cap_hit = walk_actionable("app", lambda n: tree[n], attrs, lambda n: ["AXPress"], 1000, 800)
+    assert [n.label for n in found] == ["File"]
+    assert not cap_hit
+
+
+def test_an_app_that_lists_itself_as_a_child_terminates():
+    tree = {"app": ["app", "app", "bar"], "bar": ["file"], "file": []}
+    frames = {"app": None, "bar": (0, 0, 800, 24), "file": (40, 0, 30, 24)}
+    roles = {"app": "AXApplication", "bar": "AXMenuBar", "file": "AXMenuBarItem"}
+
+    def attrs(n):
+        return AxAttrs(roles[n], "File" if n == "file" else "", frames[n])
+
+    found, _, cap_hit = walk_actionable("app", lambda n: tree[n], attrs, lambda n: ["AXPress"], 1000, 800)
+    assert [n.label for n in found] == ["File"]
+    assert not cap_hit

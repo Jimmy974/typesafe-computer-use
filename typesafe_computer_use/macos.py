@@ -320,6 +320,24 @@ def off_display(frame: Frame | None, display_w_pt: float, display_h_pt: float) -
     return x >= display_w_pt or y >= display_h_pt or x + w <= 0 or y + h <= 0
 
 
+def node_identity(node) -> object:
+    """Accessibility elements hash by the element they wrap, so two fetches of one control compare
+    equal; anything unhashable (a fake node in a test) falls back to object identity."""
+    try:
+        hash(node)
+    except TypeError:
+        return ("id", id(node))
+    return node
+
+
+def subtree_key(role: str, label: str, frame: Frame | None) -> tuple | None:
+    """Identity of a node for de-duplication: same role, label and frame is the same control, whatever
+    object the bridge wrapped it in. Frameless and zero-size nodes are containers and are never keyed."""
+    if frame is None or frame[2] <= 0 or frame[3] <= 0:
+        return None
+    return (role, label, round(frame[0]), round(frame[1]), round(frame[2]), round(frame[3]))
+
+
 def clickable(frame: Frame | None) -> bool:
     return frame is not None and min(frame[2], frame[3]) >= AX_MIN_SIDE_PT
 
@@ -367,14 +385,25 @@ def walk_actionable(
     deadline = clock() + time_cap
     queue = deque([(root, "", False, False)])
     seen = 0
+    visited: set = set()  # elements compare by identity across fetches, so a self-listing app is walked once
+    visited_keys: set[tuple] = set()  # and a control handed over as several distinct objects is kept once
     while queue:
         if seen >= node_cap or clock() >= deadline:
             return found, offscreen, True
         node, parent_label, parent_emitted, hidden = queue.popleft()
+        identity = node_identity(node)
+        if identity in visited:
+            continue
+        visited.add(identity)
         seen += 1
         role, own_label, frame = attrs(node)
         if role in AX_SKIP_SUBTREE_ROLES:
             continue
+        key = subtree_key(role, own_label, frame)
+        if key is not None:
+            if key in visited_keys:
+                continue
+            visited_keys.add(key)
         hidden = hidden or off_display(frame, display_w_pt, display_h_pt)
         if hidden and len(offscreen) >= offscreen_cap:
             continue  # nothing left to collect down there, and it never counted on screen
