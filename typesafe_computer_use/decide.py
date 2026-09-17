@@ -1,4 +1,4 @@
-"""The TypeSafe side: state, criteria, and the three-Choice request."""
+"""The TypeSafe side: state, criteria, and the one multi-Choice request."""
 
 from __future__ import annotations
 
@@ -8,9 +8,15 @@ from typesafe_sdk import Choice, ChoiceAnswer, Noul, TypeSafeClient
 
 from .config import SITES
 from .dates import date_hints, now_context
-from .models import Field, Item, Screen
+from .models import AxNode, Field, Item, Screen
 
 STOP_KINDS = ("done", "none")
+OFFSCREEN_PREFIX = "offscreen:"
+PRESS_OFFSCREEN = (
+    "Activate a labelled control that the app exposes but that is not currently visible on screen "
+    "(chosen in the offscreen question). Use when the needed control is known to exist but is "
+    "scrolled out of view or not yet shown."
+)
 
 
 def fixed_actions(browser: str, email: str | None) -> dict[str, str]:
@@ -44,8 +50,11 @@ def fixed_actions(browser: str, email: str | None) -> dict[str, str]:
     return actions
 
 
-def kind_criteria(browser: str, email: str | None) -> dict[str, str]:
-    return {"click_item": "Click one of the on-screen text items (chosen in the item question).", **fixed_actions(browser, email)}
+def kind_criteria(browser: str, email: str | None, offscreen: bool = False) -> dict[str, str]:
+    clicks = {"click_item": "Click one of the on-screen text items (chosen in the item question)."}
+    if offscreen:
+        clicks["press_offscreen"] = PRESS_OFFSCREEN
+    return {**clicks, **fixed_actions(browser, email)}
 
 
 def item_criteria(screen: Screen, items: list[Item]) -> dict[str, str]:
@@ -58,6 +67,16 @@ def item_criteria(screen: Screen, items: list[Item]) -> dict[str, str]:
         )
         for it in items
     }
+
+
+def offscreen_criteria(nodes: list[AxNode]) -> dict[str, str]:
+    """Each off-screen control as one line, keyed by its position in `screen.offscreen`."""
+    return {str(i): f"{node.role_word} {node.label!r} (not visible)" for i, node in enumerate(nodes)}
+
+
+def offscreen_records(nodes: list[AxNode]) -> list[dict]:
+    """The same controls as state, with the key the offscreen question answers with."""
+    return [{"k": i, "role": node.role_word, "label": node.label} for i, node in enumerate(nodes)]
 
 
 def site_criteria() -> dict[str, str]:
@@ -83,6 +102,7 @@ def base_state(goal: str, screen: Screen, items: list[Item], history: list[str])
             }
             for it in items
         ],
+        **({"offscreen_controls": offscreen_records(screen.offscreen)} if screen.offscreen else {}),
     }
 
 
@@ -91,18 +111,31 @@ class Decision:
     kind: ChoiceAnswer
     item: ChoiceAnswer | None
     site: ChoiceAnswer
+    offscreen: ChoiceAnswer | None = None
 
     @property
     def clicking(self) -> bool:
         return self.kind.choice == "click_item" and self.item is not None
 
     @property
+    def pressing_offscreen(self) -> bool:
+        return self.kind.choice == "press_offscreen" and self.offscreen is not None
+
+    @property
     def chosen(self) -> str:
-        return self.item.choice if self.clicking else self.kind.choice
+        if self.clicking:
+            return self.item.choice
+        if self.pressing_offscreen:
+            return f"{OFFSCREEN_PREFIX}{self.offscreen.choice}"
+        return self.kind.choice
 
     @property
     def confidence(self) -> float:
-        return min(self.kind.confidence, self.item.confidence) if self.clicking else self.kind.confidence
+        if self.clicking:
+            return min(self.kind.confidence, self.item.confidence)
+        if self.pressing_offscreen:
+            return min(self.kind.confidence, self.offscreen.confidence)
+        return self.kind.confidence
 
     @property
     def stops(self) -> bool:
@@ -119,7 +152,7 @@ def decide(
                 "makes the most progress toward the goal right now? Do not repeat an action "
                 "that was just taken unless the screen changed."
             ),
-            criteria=kind_criteria(browser, email),
+            criteria=kind_criteria(browser, email, bool(screen.offscreen)),
         ),
         "site": Choice(instructions="If a website must be opened to progress the goal, which one?", criteria=site_criteria()),
     }
@@ -132,8 +165,17 @@ def decide(
             ),
             criteria=item_criteria(screen, items),
         )
+    if screen.offscreen:
+        questions["offscreen"] = Choice(
+            instructions=(
+                "If activating a control that is not on screen is the right move, which control? "
+                "These are real controls of the app, reachable without the mouse, but nothing on "
+                "the capture points at them."
+            ),
+            criteria=offscreen_criteria(screen.offscreen),
+        )
     answers = client.system_one(state=base_state(goal, screen, items, history), questions=questions).answers
-    return Decision(kind=answers["kind"], item=answers.get("item"), site=answers["site"])
+    return Decision(kind=answers["kind"], item=answers.get("item"), site=answers["site"], offscreen=answers.get("offscreen"))
 
 
 def verify_typed(client: TypeSafeClient, goal: str, field_before: Field, typed: str, field_after: Field | None) -> float:

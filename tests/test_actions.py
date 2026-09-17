@@ -1,11 +1,12 @@
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
 from typesafe_computer_use import actions, macos
-from typesafe_computer_use.actions import click_item, fill_field
-from typesafe_computer_use.models import Field, Item
+from typesafe_computer_use.actions import click_item, fill_field, press_offscreen
+from typesafe_computer_use.models import AxNode, Field, Item
 
 
 @pytest.fixture
@@ -45,6 +46,42 @@ def test_an_ocr_only_item_is_clicked_without_asking_accessibility(screen, calls,
     item = Item(3, "Register Now", 0.9, 100.0, 100.0, 300.0, 140.0)
     assert click_item(item, screen) == "clicked 'Register Now'"
     assert calls == [("click", (100.0, 60.0))]
+
+
+def test_an_off_screen_control_is_pressed_through_accessibility(screen, calls, monkeypatch):
+    ref = object()
+    pressed = []
+    monkeypatch.setattr(macos, "ax_press", lambda r: pressed.append(r) or True)
+    node = AxNode(role="AXLink", label="Register Now", x=0.0, y=-4200.0, w=120.0, h=32.0, pressable=True, ref=ref)
+    live = replace(screen, offscreen=[node])
+    assert press_offscreen("0", live) == "pressed 'Register Now' (off-screen control) via accessibility"
+    assert pressed == [ref] and calls == []
+
+
+def test_a_refused_off_screen_press_is_a_no_op_with_nothing_to_click(screen, calls, monkeypatch):
+    monkeypatch.setattr(macos, "ax_press", lambda ref: False)
+    node = AxNode(role="AXLink", label="Register Now", x=0.0, y=-4200.0, w=120.0, h=32.0, pressable=True, ref=object())
+    refusal = press_offscreen("0", replace(screen, offscreen=[node]))
+    assert refusal == "press_offscreen refused: 'Register Now' did not accept the press"
+    assert actions.is_noop(refusal) and calls == []
+
+
+def test_an_offscreen_key_that_names_nothing_is_refused(screen, calls, monkeypatch):
+    monkeypatch.setattr(macos, "ax_press", lambda ref: pytest.fail("no element to press"))
+    refusal = press_offscreen("4", screen)
+    assert refusal == "press_offscreen refused: there is no off-screen control '4'"
+    assert actions.is_noop(refusal) and calls == []
+
+
+def test_perform_routes_an_offscreen_key_to_the_press(screen, calls, monkeypatch):
+    pressed = []
+    monkeypatch.setattr(macos, "ax_press", lambda r: pressed.append(r) or True)
+    ref = object()
+    node = AxNode(role="AXRow", label="Note 900", x=0.0, y=42718.0, w=280.0, h=68.0, pressable=True, ref=ref)
+    live = replace(screen, offscreen=[node])
+    decision = SimpleNamespace(chosen="offscreen:0")
+    assert actions.perform(decision, live, [], None) == "pressed 'Note 900' (off-screen control) via accessibility"
+    assert pressed == [ref]
 
 
 def test_a_fallback_click_is_not_treated_as_a_no_op():

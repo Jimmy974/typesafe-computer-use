@@ -30,26 +30,6 @@ TILE_DIFF = 6.0  # mean absolute 8-bit difference that counts a tile as changed
 REOCR_FRACTION = 0.6  # above this share of changed tiles, reading the whole region is cheaper
 MAX_REOCR_RECTS = 4  # past this, the per-call overhead outweighs the pixels another rectangle saves
 
-# Accessibility roles as one human word. Anything unlisted is "other".
-ROLE_WORDS = {
-    "AXButton": "button",
-    "AXCell": "cell",
-    "AXCheckBox": "checkbox",
-    "AXComboBox": "field",
-    "AXImage": "image",
-    "AXLink": "link",
-    "AXMenuBarItem": "menu",
-    "AXMenuButton": "button",
-    "AXPopUpButton": "popup",
-    "AXRadioButton": "radio",
-    "AXRow": "cell",
-    "AXSearchField": "field",
-    "AXSlider": "slider",
-    "AXTab": "tab",
-    "AXTextArea": "field",
-    "AXTextField": "field",
-}
-
 
 def capture(
     image_path: Path | None = None,
@@ -105,18 +85,24 @@ def perceive(
     pressed through it later. The merge renumbers everything, hence the side table over the
     final indices rather than a handle on the item itself, which has to stay printable.
 
+    Fills `screen.offscreen` too: labelled controls the app exposes but does not show. They are
+    offered on their own, never as items, because nothing on the capture points at them.
+
     A `cache` carries the previous capture's OCR, so only the tiles that changed are read again.
     Pass None to read the whole region every time, which is what a replay and an inspection do.
     """
     with phase(timing, "ocr"):
         blocks = ocr(screen, budget, goal, cache, timing)
     with phase(timing, "ax"):
-        nodes = ax_nodes(screen, budget)
+        nodes, hidden = ax_nodes(screen, budget)
         controls = to_ax_items(nodes, screen.scale)
     merged = merge_with_origins(blocks, controls, budget)
     screen.ax_refs.clear()
     screen.ax_refs.update({it.index: nodes[origin].ref for it, origin in merged if origin is not None and nodes[origin].ref})
-    return [it for it, _ in merged]
+    items = [it for it, _ in merged]
+    screen.offscreen.clear()
+    screen.offscreen.extend(offscreen_controls(hidden, items))
+    return items
 
 
 def ocr(
@@ -442,20 +428,39 @@ def merge_reocr(previous: list[Line], fresh: list[Line], rects: list[Box]) -> li
     return [ln for ln in previous if not any(boxes_intersect(ln[2], rect) for rect in rects)] + list(fresh)
 
 
-def ax_nodes(screen: Screen, budget: int) -> list[AxNode]:
-    """The frontmost app's labelled controls, in screen points.
+def ax_nodes(screen: Screen, budget: int) -> tuple[list[AxNode], list[AxNode]]:
+    """The frontmost app's labelled controls, in screen points, and the off-screen ones it still exposes.
 
     Icon-only buttons are invisible to OCR and live only here. Accessibility is best effort:
     a missing pid, a refusing app, or a raising bridge all mean OCR carries the step alone.
     """
     if screen.pid is None:
-        return []
+        return [], []
     width_pt, height_pt = screen.size_pt
     try:
-        nodes, _capped = macos.actionable_elements(screen.pid, width_pt, height_pt)
+        nodes, hidden, _capped = macos.actionable_elements(screen.pid, width_pt, height_pt)
     except Exception:
-        return []
-    return [node for node in nodes[:budget] if node.label]
+        return [], []
+    return [node for node in nodes[:budget] if node.label], [node for node in hidden if node.label]
+
+
+def offscreen_controls(nodes: list[AxNode], items: list[Item]) -> list[AxNode]:
+    """The off-screen controls worth offering: one per role and label, minus anything already on screen.
+
+    An app repeats a label across a scrolled list and across the copies of a view it keeps alive, and
+    the first one is as good as any since the press goes to the element. A label the visible list
+    already carries is dropped outright: the item on screen is the better way to reach it.
+    """
+    visible = {it.text for it in items}
+    seen: set[tuple[str, str]] = set()
+    out: list[AxNode] = []
+    for node in nodes:
+        key = (node.role, node.label)
+        if key in seen or node.label in visible:
+            continue
+        seen.add(key)
+        out.append(node)
+    return out
 
 
 def to_ax_items(nodes: list[AxNode], scale: float) -> list[Item]:
@@ -469,7 +474,7 @@ def to_ax_items(nodes: list[AxNode], scale: float) -> list[Item]:
             y1=node.y * scale,
             x2=(node.x + node.w) * scale,
             y2=(node.y + node.h) * scale,
-            role=ROLE_WORDS.get(node.role, "other"),
+            role=node.role_word,
             source="ax",
         )
         for i, node in enumerate(nodes)
@@ -477,8 +482,8 @@ def to_ax_items(nodes: list[AxNode], scale: float) -> list[Item]:
 
 
 def ax_items(screen: Screen, budget: int) -> list[Item]:
-    """The frontmost app's labelled controls as items on the capture."""
-    return to_ax_items(ax_nodes(screen, budget), screen.scale)
+    """The frontmost app's labelled on-screen controls as items on the capture."""
+    return to_ax_items(ax_nodes(screen, budget)[0], screen.scale)
 
 
 def merge_sources(ocr_items: list[Item], ax_items: list[Item], budget: int = MAX_OPTIONS) -> list[Item]:

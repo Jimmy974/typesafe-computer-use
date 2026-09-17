@@ -10,7 +10,7 @@ from typesafe_sdk import TypeSafeClient
 
 from . import macos
 from .config import SITES
-from .decide import Decision, verify_typed
+from .decide import OFFSCREEN_PREFIX, Decision, verify_typed
 from .models import Field, Item, Screen
 from .writer import compose_text, compose_url
 
@@ -37,6 +37,8 @@ def perform(decision: Decision, screen: Screen, items: list[Item], ctx: Context)
     by_index = {str(it.index): it for it in items}
     if key in by_index:
         return click_item(by_index[key], screen)
+    if key.startswith(OFFSCREEN_PREFIX):
+        return press_offscreen(key[len(OFFSCREEN_PREFIX) :], screen)
     handler = _HANDLERS.get(key)
     if handler is None:
         raise ValueError(f"unknown action {key!r}")
@@ -56,6 +58,22 @@ def click_item(item: Item, screen: Screen) -> str:
     if ref is None:
         return f"clicked {item.text!r}"
     return f"clicked {item.text!r} (accessibility press did not take)"
+
+
+def press_offscreen(key: str, screen: Screen) -> str:
+    """Press a control the app exposes but does not show.
+
+    AXPress does not need the element to be visible: a note row scrolled thousands of points down
+    and a link the browser parked above the viewport both take it. There is no pixel to fall back
+    on, so a refusal is the end of it and reads as a no-op.
+    """
+    nodes = screen.offscreen
+    node = nodes[int(key)] if key.isdigit() and int(key) < len(nodes) else None
+    if node is None:
+        return f"press_offscreen refused: there is no off-screen control {key!r}"
+    if macos.ax_press(node.ref):
+        return f"pressed {node.label!r} (off-screen control) via accessibility"
+    return f"press_offscreen refused: {node.label!r} did not accept the press"
 
 
 def fill_field(field: Field, text: str) -> str:

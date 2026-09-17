@@ -9,6 +9,27 @@ from PIL import Image
 TEXT_ROLES = {"AXTextField", "AXTextArea", "AXSearchField", "AXComboBox"}
 Box = tuple[float, float, float, float]  # x1, y1, x2, y2 in capture pixels
 
+# Accessibility roles as one human word. Anything unlisted is "other".
+ROLE_WORDS = {
+    "AXButton": "button",
+    "AXCell": "cell",
+    "AXCheckBox": "checkbox",
+    "AXComboBox": "field",
+    "AXDockItem": "dock item",
+    "AXImage": "image",
+    "AXLink": "link",
+    "AXMenuBarItem": "menu",
+    "AXMenuButton": "button",
+    "AXPopUpButton": "popup",
+    "AXRadioButton": "radio",
+    "AXRow": "cell",
+    "AXSearchField": "field",
+    "AXSlider": "slider",
+    "AXTab": "tab",
+    "AXTextArea": "field",
+    "AXTextField": "field",
+}
+
 
 class Abort(Exception):
     """Raised when the user triggers an escape hatch."""
@@ -59,6 +80,10 @@ class AxNode:
     pressable: bool
     ref: object | None = field(default=None, compare=False, repr=False)
 
+    @property
+    def role_word(self) -> str:
+        return ROLE_WORDS.get(self.role, "other")
+
 
 @dataclass(frozen=True)
 class Field:
@@ -106,6 +131,7 @@ class Screen:
     pid: int | None = None  # frontmost process, for the accessibility walk; None in replay
     window: tuple[float, float, float, float] | None = None  # frontmost window, x/y/w/h in points; None in replay
     ax_refs: dict[int, object] = field(default_factory=dict)  # item index -> accessibility element, when it has one
+    offscreen: list[AxNode] = field(default_factory=list)  # labelled controls the app exposes but does not show
 
     @property
     def size_pt(self) -> tuple[float, float]:

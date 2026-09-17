@@ -1,6 +1,8 @@
+from dataclasses import replace
 from types import SimpleNamespace
 
-from typesafe_computer_use.decide import Decision, base_state, item_criteria, kind_criteria
+from typesafe_computer_use.decide import Decision, base_state, item_criteria, kind_criteria, offscreen_criteria
+from typesafe_computer_use.models import AxNode
 
 
 def answer(choice, confidence, probabilities=None):
@@ -20,6 +22,39 @@ def test_decision_fixed_action_ignores_item():
 def test_decision_stops_on_done_or_none():
     assert Decision(kind=answer("done", 0.9), item=None, site=answer("none", 1)).stops
     assert Decision(kind=answer("none", 0.9), item=None, site=answer("none", 1)).stops
+
+
+def test_decision_press_offscreen_uses_the_offscreen_answer_and_min_confidence():
+    d = Decision(kind=answer("press_offscreen", 0.9), item=answer("3", 0.9), site=answer("none", 1.0), offscreen=answer("7", 0.5))
+    assert d.pressing_offscreen and not d.clicking and d.chosen == "offscreen:7" and d.confidence == 0.5
+
+
+def test_decision_ignores_an_offscreen_answer_for_any_other_kind():
+    d = Decision(kind=answer("click_item", 0.9), item=answer("3", 0.8), site=answer("none", 1.0), offscreen=answer("7", 0.1))
+    assert not d.pressing_offscreen and d.chosen == "3" and d.confidence == 0.8
+
+
+def test_kind_criteria_offers_press_offscreen_only_when_there_are_offscreen_controls():
+    assert "press_offscreen" not in kind_criteria("Google Chrome", None)
+    assert "press_offscreen" in kind_criteria("Google Chrome", None, offscreen=True)
+
+
+def test_offscreen_criteria_and_state_name_the_role_and_say_it_is_not_visible(screen, make_item):
+    nodes = [
+        AxNode(role="AXLink", label="Register Now", x=0.0, y=-4200.0, w=120.0, h=32.0, pressable=True),
+        AxNode(role="AXRow", label="Note 900", x=0.0, y=42718.0, w=280.0, h=68.0, pressable=True),
+    ]
+    assert offscreen_criteria(nodes) == {
+        "0": "link 'Register Now' (not visible)",
+        "1": "cell 'Note 900' (not visible)",
+    }
+    live = replace(screen, offscreen=nodes)
+    state = base_state("buy the thing", live, [make_item(0, "Buy")], [])
+    assert state["offscreen_controls"] == [
+        {"k": 0, "role": "link", "label": "Register Now"},
+        {"k": 1, "role": "cell", "label": "Note 900"},
+    ]
+    assert "offscreen_controls" not in base_state("buy the thing", screen, [make_item(0, "Buy")], [])
 
 
 def test_kind_criteria_offers_email_only_when_set():

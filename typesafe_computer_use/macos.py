@@ -292,6 +292,7 @@ AX_LABEL_DESCENDANT_ROLES = {"AXCell", "AXRow"}
 AX_SKIP_SUBTREE_ROLES = {"AXMenu"}  # a closed menu: thousands of zero-sized items, none on screen
 AX_NODE_CAP = 4000
 AX_TIME_CAP = 0.6
+AX_OFFSCREEN_CAP = 120  # off-screen controls collected before the walk stops looking for more
 AX_MIN_SIDE_PT = 4.0  # anything thinner is a Chromium sliver for a scrolled-out node
 AX_MESSAGE_TIMEOUT = 0.2
 AX_FANOUT = 8  # children scanned per level when recovering a label
@@ -346,28 +347,37 @@ def walk_actionable(
     display_h_pt: float,
     node_cap: int = AX_NODE_CAP,
     time_cap: float = AX_TIME_CAP,
+    offscreen_cap: int = AX_OFFSCREEN_CAP,
     clock: Callable[[], float] = time.monotonic,
-) -> tuple[list[AxNode], bool]:
-    """Breadth-first hunt for labelled on-screen controls. Returns them and whether a cap cut the walk short.
+) -> tuple[list[AxNode], list[AxNode], bool]:
+    """Breadth-first hunt for labelled controls: the on-screen ones, the reachable off-screen ones,
+    and whether a cap cut the walk short.
 
-    The three callables are the only way into the tree, so the pruning rules are platform-free
+    The four callables are the only way into the tree, so the pruning rules are platform-free
     and testable against a plain dict. The caps are the point: an unbounded walk of a note list
     or a long web page costs seconds and finds nothing on screen.
+
+    A node that misses the display, or that the app clamped to a sliver, is not on screen and is
+    not offered as one: its subtree stays pruned from `found`. But AXPress does not need a node to
+    be visible, so a labelled one that accepts the action is collected separately, down to
+    `offscreen_cap`, after which those subtrees are dropped again and the walk is the old one.
     """
     found: list[AxNode] = []
+    offscreen: list[AxNode] = []
     deadline = clock() + time_cap
-    queue = deque([(root, "", False)])
+    queue = deque([(root, "", False, False)])
     seen = 0
     while queue:
         if seen >= node_cap or clock() >= deadline:
-            return found, True
-        node, parent_label, parent_emitted = queue.popleft()
+            return found, offscreen, True
+        node, parent_label, parent_emitted, hidden = queue.popleft()
         seen += 1
         role, own_label, frame = attrs(node)
         if role in AX_SKIP_SUBTREE_ROLES:
             continue
-        if off_display(frame, display_w_pt, display_h_pt):
-            continue
+        hidden = hidden or off_display(frame, display_w_pt, display_h_pt)
+        if hidden and len(offscreen) >= offscreen_cap:
+            continue  # nothing left to collect down there, and it never counted on screen
         kids = list(children(node))
         label, inherited = own_label, False
         if not label and role in AX_LABEL_DESCENDANT_ROLES:
@@ -377,15 +387,20 @@ def walk_actionable(
         emitted = False
         duplicate = inherited and parent_emitted  # the parent already stands for this label
         nameless_group = role == "AXGroup" and not own_label  # a Chromium layout box, not a control
-        if label and clickable(frame) and not duplicate and not nameless_group:
-            pressable = AX_PRESS in actions(node)
-            if pressable or role in AX_ACTIONABLE_ROLES:
+        visible = not hidden and clickable(frame)
+        if label and not duplicate and not nameless_group:
+            if visible:
+                pressable = AX_PRESS in actions(node)
+                if pressable or role in AX_ACTIONABLE_ROLES:
+                    x, y, w, h = frame
+                    found.append(AxNode(role=role, label=label, x=x, y=y, w=w, h=h, pressable=pressable, ref=node))
+                    emitted = True
+            elif frame is not None and len(offscreen) < offscreen_cap and AX_PRESS in actions(node):
                 x, y, w, h = frame
-                found.append(AxNode(role=role, label=label, x=x, y=y, w=w, h=h, pressable=pressable, ref=node))
-                emitted = True
+                offscreen.append(AxNode(role=role, label=label, x=x, y=y, w=w, h=h, pressable=True, ref=node))
         child_label = own_label if role in AX_LABEL_PARENT_ROLES else ""
-        queue.extend((kid, child_label, emitted) for kid in kids)
-    return found, False
+        queue.extend((kid, child_label, emitted, hidden) for kid in kids)
+    return found, offscreen, False
 
 
 def _ax_children(element) -> list:
@@ -428,8 +443,9 @@ def _ax_actions(element) -> list[str]:
     return [str(n) for n in names] if err == 0 and names else []
 
 
-def actionable_elements(pid: int, display_w_pt: float, display_h_pt: float) -> tuple[list[AxNode], bool]:
-    """Labelled, on-screen controls of one process, in points, plus whether a cap cut the walk short."""
+def actionable_elements(pid: int, display_w_pt: float, display_h_pt: float) -> tuple[list[AxNode], list[AxNode], bool]:
+    """Labelled controls of one process: the on-screen ones in points, the pressable off-screen ones,
+    and whether a cap cut the walk short."""
     app = AS.AXUIElementCreateApplication(pid)
     AS.AXUIElementSetMessagingTimeout(app, AX_MESSAGE_TIMEOUT)
     return walk_actionable(app, _ax_children, _ax_attrs, _ax_actions, display_w_pt, display_h_pt)

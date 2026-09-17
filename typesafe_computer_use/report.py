@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PIL import ImageDraw, ImageFont
 
-from .decide import base_state, item_criteria, kind_criteria, site_criteria
+from .decide import base_state, item_criteria, kind_criteria, offscreen_criteria, site_criteria
 from .models import Item, Screen
 
 FONT_PATH = "/System/Library/Fonts/Helvetica.ttc"
@@ -46,7 +46,7 @@ def render_payload(goal: str, screen: Screen, items: list[Item], history: list[s
         RULE,
         "QUESTION kind  (Choice criteria)",
         RULE,
-        json.dumps(kind_criteria(browser, email), indent=2),
+        json.dumps(kind_criteria(browser, email, bool(screen.offscreen)), indent=2),
         "",
         RULE,
         "QUESTION item  (Choice criteria)",
@@ -58,6 +58,16 @@ def render_payload(goal: str, screen: Screen, items: list[Item], history: list[s
         RULE,
         json.dumps(site_criteria(), indent=2),
         "",
+    ]
+    if screen.offscreen:
+        parts += [
+            RULE,
+            "QUESTION offscreen  (Choice criteria)",
+            RULE,
+            json.dumps(offscreen_criteria(screen.offscreen), indent=2),
+            "",
+        ]
+    parts += [
         RULE,
         f"ITEMS  ({len(items)} after merge/filter, {ax_count(items)} from the accessibility tree; "
         f"pixel boxes on the {screen.image.width}x{screen.image.height} capture, scale {screen.scale:g})",
@@ -70,6 +80,15 @@ def render_payload(goal: str, screen: Screen, items: list[Item], history: list[s
             f"box=({it.x1:.0f},{it.y1:.0f})-({it.x2:.0f},{it.y2:.0f}) "
             f"click_pt=({cx:.0f},{cy:.0f}) {screen.region(it):13} {it.text!r}"
         )
+    if screen.offscreen:
+        parts += [
+            "",
+            RULE,
+            f"OFFSCREEN CONTROLS  ({len(screen.offscreen)} the app exposes without showing; pressed through "
+            "accessibility, never clicked)",
+            RULE,
+        ]
+        parts += [f"[{i:3d}] role={node.role:22} {node.label!r}" for i, node in enumerate(screen.offscreen)]
     if screen.field:
         parts += ["", "FOCUSED FIELD", json.dumps(screen.field.record(), indent=2)]
     return "\n".join(parts) + "\n"

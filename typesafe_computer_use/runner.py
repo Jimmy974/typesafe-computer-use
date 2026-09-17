@@ -12,7 +12,7 @@ from typesafe_sdk import TypeSafeClient
 from . import macos
 from .actions import Context, is_noop, perform
 from .config import DEFAULT_DELAY, DEFAULT_MIN_CONFIDENCE, DEFAULT_STEPS, MAX_OPTIONS
-from .decide import Decision, decide
+from .decide import Decision, decide, offscreen_records
 from .models import Abort, Item, Screen
 from .perception import OcrCache, capture, perceive
 from .report import Log, annotate, ax_count, render_payload, top
@@ -107,7 +107,8 @@ def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
     field_desc = f" field={screen.field.role}:{screen.field.label!r}" if screen.field else ""
     log(
         f"\nstep {step}: app={screen.app!r}{field_desc} url={screen.url!r} items={len(items)} ax={ax_count(items)} "
-        f"kind={decision.kind.choice} ({decision.kind.confidence:.2f}) site={decision.site.choice}"
+        f"offscreen={len(screen.offscreen)} kind={decision.kind.choice} ({decision.kind.confidence:.2f}) "
+        f"site={decision.site.choice}"
     )
     for key, p in top(decision.kind, 4):
         log(f"  {p:5.2f}  {key}")
@@ -115,6 +116,10 @@ def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
         log(f"  item ({decision.item.confidence:.2f}):")
         for key, p in top(decision.item, 4):
             log(f"  {p:5.2f}  [{key}] {by_index[key].text!r}")
+    if decision.offscreen is not None:
+        log(f"  offscreen ({decision.offscreen.confidence:.2f}):")
+        for key, p in top(decision.offscreen, 3):
+            log(f"  {p:5.2f}  [{key}] {screen.offscreen[int(key)].label!r}")
 
     keep_going = resolve(cfg, ctx, state, screen, items, decision, timing, log)
     timing.setdefault("act", 0.0)
@@ -180,6 +185,9 @@ def answers(decision: Decision, screen: Screen, items: list[Item], timing: dict[
         "item_probabilities": decision.item.probabilities if decision.item else None,
         "site": decision.site.choice,
         "site_probabilities": decision.site.probabilities,
+        "offscreen": decision.offscreen.choice if decision.offscreen else None,
+        "offscreen_probabilities": decision.offscreen.probabilities if decision.offscreen else None,
+        "offscreen_controls": offscreen_records(screen.offscreen),
         "chosen": decision.chosen,
         "confidence": decision.confidence,
         "timing": timing,

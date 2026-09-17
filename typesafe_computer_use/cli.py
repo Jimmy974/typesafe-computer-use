@@ -106,7 +106,7 @@ def inspect(argv: list[str] | None = None) -> None:
 
     print(
         f"app={screen.app!r} url={screen.url!r} items={len(items)} ax={ax_count(items)} "
-        f"field={screen.field.role if screen.field else None}"
+        f"offscreen={len(screen.offscreen)} field={screen.field.role if screen.field else None}"
     )
     print(format_timing(timing))
     print(f"  {annotated}\n  {text}")

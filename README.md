@@ -89,7 +89,8 @@ at `--steps`.
 
 ```
 screencapture ─► Vision OCR ─► merge lines into blocks ─► drop lines echoing the goal
-accessibility ─► actionable elements (role, label, frame), pruned to the display
+accessibility ─► actionable elements (role, label, frame), pruned to the display,
+                 the labelled pressable ones it pruned kept as off-screen controls
                      │
                      └─► one numbered list of items, each carrying its source
                      │
@@ -100,12 +101,13 @@ dates.py      ─► "dated 2026-10-13 (in 27 days)" on any block containing a d
                  "near a line dated ..." on its neighbours
                      │
                      ▼
-        one TypeSafe request, three Choices
-        ┌──────────────────────────────────────────────────────┐
-        │ kind  : click_item | open_site | type_text | scroll… │
-        │ item  : which item (used only for click_item)        │
-        │ site  : which catalog site (used only for open_site) │
-        └──────────────────────────────────────────────────────┘
+        one TypeSafe request, three Choices, four with off-screen controls
+        ┌────────────────────────────────────────────────────────────┐
+        │ kind      : click_item | open_site | type_text | scroll…   │
+        │ item      : which item (used only for click_item)          │
+        │ site      : which catalog site (used only for open_site)   │
+        │ offscreen : which hidden control (only for press_offscreen)│
+        └────────────────────────────────────────────────────────────┘
                      │
                      ▼
         deterministic action ─► wait ─► next step
@@ -170,11 +172,29 @@ Walks measured here: Finder 152 controls in 0.08 s, Chrome 172 in 0.59 s. The as
 handshake attributes (`AXManualAccessibility`, `AXEnhancedUserInterface`) are unsupported
 on this macOS, so nothing relies on them.
 
+#### Off-screen controls
+
+`AXPress` does not need an element to be visible. Notes selects a row parked thousands of
+points below the display, Chromium delivers a click to a link it clamped to a 1 px sliver
+because the page is scrolled past it, and an auto-hidden Dock hands over all 37 of its
+items from 5 pt below the bottom edge. So the same walk keeps the labelled, pressable nodes
+it pruned, and offers them as a separate capped list rather than mixing them into the items:
+nothing on the capture points at them, and a mouse click would land somewhere else entirely.
+
+The list is deduplicated by role and label, drops any label the visible items already carry,
+and stops at 120 controls, after which those subtrees are pruned as before, so the walk costs
+what it always did. It is offered only when it is not empty, as a `press_offscreen` action
+plus an `offscreen` question, and the step log counts it next to `ax=`. A refusal is the end
+of it: there is no pixel to fall back on, so it reads as a no-op. What a walk finds depends
+on the app, and the node and time caps bind first on a big tree: Notes and Chrome spend all
+4000 nodes on what is already on screen and report nothing hidden.
+
 ### Action space
 
 | key | does |
 |---|---|
 | `click_item` | press the element through the accessibility tree when the item came from it, so the press lands on the control rather than on whatever covers it; a mouse click at the center of the box otherwise, and as the fallback when the press is refused |
+| `press_offscreen` | `AXPress` a labelled control the app exposes but does not show, chosen from the off-screen list; offered only when that list is not empty, and a refusal counts as a no-op since there is no pixel to fall back on |
 | `open_site` | AppleScript `open location` for a `SITES` catalog entry, or a URL the writer proposes |
 | `switch_to_browser` | bring the browser forward to continue with a page already open there |
 | `type_text` | the writer composes the string; it is set on the focused element through the accessibility tree, with keystrokes as the fallback when the value does not read back, and a TypeSafe Noul then checks the field's value |
@@ -208,8 +228,8 @@ Every run writes `runs/<timestamp>/` so a stall can be replayed and fixed offlin
 | `run.log`, `run.json` | everything printed; goal, outcome, seconds, every action, config, and `timing` (mean and max seconds per phase, with `steps_timed`) |
 | `step-NN-raw.png` | the capture |
 | `step-NN.png` | items numbered in blue, accessibility ones orange, the chosen one red, the focused field green |
-| `step-NN-payload.txt` | the exact `state` and criteria sent to TypeSafe, then every item with source, role, box, click point, confidence |
-| `step-NN-answers.json` | every probability the classifier returned, plus `timing` for that step |
+| `step-NN-payload.txt` | the exact `state` and criteria sent to TypeSafe, then every item with source, role, box, click point, confidence, then the off-screen controls |
+| `step-NN-answers.json` | every probability the classifier returned, the off-screen controls it was offered, plus `timing` for that step |
 
 Each step also logs what it cost, so a slow phase is obvious:
 
