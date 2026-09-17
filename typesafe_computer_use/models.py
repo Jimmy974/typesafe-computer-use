@@ -104,6 +104,7 @@ class Screen:
     field: Field | None
     url: str | None
     pid: int | None = None  # frontmost process, for the accessibility walk; None in replay
+    window: tuple[float, float, float, float] | None = None  # frontmost window, x/y/w/h in points; None in replay
     ax_refs: dict[int, object] = field(default_factory=dict)  # item index -> accessibility element, when it has one
 
     @property

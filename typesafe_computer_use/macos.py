@@ -22,6 +22,7 @@ from .config import ABORT_CORNER_PX
 from .models import Abort, AxNode, Field
 
 KEYCODES = {"return": 36, "tab": 48, "escape": 53, "a": 0, "delete": 51}
+MIN_WINDOW_SIDE_PT = 50.0  # anything smaller is a palette or a shadow, not the window being worked in
 
 # ------------------------------------------------------------------ escape hatch
 
@@ -139,16 +140,28 @@ def browser_url(browser: str) -> str | None:
         return None
 
 
-def frontmost_window_center() -> tuple[float, float] | None:
-    """Center of the frontmost app's topmost on-screen window, in points. Pure Quartz, no AX needed."""
-    pid = frontmost_pid()
+def frontmost_window_bounds(pid: int | None = None) -> tuple[float, float, float, float] | None:
+    """The frontmost app's topmost on-screen window as x, y, w, h in points. Pure Quartz, no AX needed.
+
+    Pass the pid when the caller already has it; looking it up costs an AppleScript round trip.
+    """
+    pid = frontmost_pid() if pid is None else pid
     options = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
     for window in Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID) or []:
         if window.get("kCGWindowOwnerPID") == pid and window.get("kCGWindowLayer") == 0:
             b = window["kCGWindowBounds"]
-            if b["Width"] > 50 and b["Height"] > 50:
-                return b["X"] + b["Width"] / 2, b["Y"] + b["Height"] / 2
+            if b["Width"] > MIN_WINDOW_SIDE_PT and b["Height"] > MIN_WINDOW_SIDE_PT:
+                return float(b["X"]), float(b["Y"]), float(b["Width"]), float(b["Height"])
     return None
+
+
+def frontmost_window_center(pid: int | None = None) -> tuple[float, float] | None:
+    """Center of the frontmost app's topmost on-screen window, in points."""
+    bounds = frontmost_window_bounds(pid)
+    if bounds is None:
+        return None
+    x, y, w, h = bounds
+    return x + w / 2, y + h / 2
 
 
 # ------------------------------------------------------------------ capture and accessibility

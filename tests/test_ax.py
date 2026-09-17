@@ -162,7 +162,7 @@ def test_ax_refs_follow_items_through_the_merge_and_the_renumbering(screen, monk
     monkeypatch.setattr(
         perception,
         "ocr",
-        lambda screen, budget, goal: [
+        lambda screen, budget, goal, *_: [
             Item(0, "Left", 0.9, 100.0, 104.0, 220.0, 140.0),  # names the control, so the two merge
             Item(1, "Unrelated text", 0.9, 100.0, 400.0, 300.0, 430.0),
         ],
@@ -178,6 +178,6 @@ def test_ax_refs_follow_items_through_the_merge_and_the_renumbering(screen, monk
 
 
 def test_ax_refs_are_empty_without_an_accessibility_tree(screen, monkeypatch):
-    monkeypatch.setattr(perception, "ocr", lambda screen, budget, goal: [Item(0, "Only text", 0.9, 10.0, 10.0, 90.0, 40.0)])
+    monkeypatch.setattr(perception, "ocr", lambda screen, budget, goal, *_: [Item(0, "Only text", 0.9, 10.0, 10.0, 90.0, 40.0)])
     items = perception.perceive(screen, 255, "goal")
     assert [it.source for it in items] == ["ocr"] and screen.ax_refs == {}

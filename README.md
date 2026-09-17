@@ -121,6 +121,25 @@ choice. Every stall found while building this came from two options that meant t
 same thing. Confidence measures concentration, so overlapping options always read as
 doubt. Keep the action set mutually exclusive.
 
+### OCR cost
+
+Vision is about two thirds of a step, and it charges by the amount of text rather than
+the number of pixels, so the only real saving is reading less of the screen.
+
+- **Crop.** Each step reads the frontmost window plus the menu bar strip, with an 8 pt
+  margin, clamped to the display. Text on the desktop and in background windows is noise
+  to the decision. The menu bar spans the display, so the region joined with it is full
+  width and ends under the window: a full-height window saves nothing, a short one saves
+  the band beneath it.
+- **Reuse.** The capture is compared with the previous one at 1/8 scale, in 256 px tiles.
+  Unchanged tiles keep the lines they produced last step, and only the rectangle around
+  the changed tiles is read again. That rectangle grows until no known line straddles its
+  edge, because a crop through a line returns the half it can see. Past 60% changed tiles,
+  or on an app switch or a window move, the whole region is read instead.
+
+The timing line says how much was read: `ocr 0.31s (22% of screen)`. A replay (`--image`)
+always reads the whole image and never reuses, so an offline repro matches the original run.
+
 ### Accessibility tree
 
 OCR cannot see an icon. The accessibility tree can, so each step also walks the frontmost
@@ -190,7 +209,7 @@ Every run writes `runs/<timestamp>/` so a stall can be replayed and fixed offlin
 Each step also logs what it cost, so a slow phase is obvious:
 
 ```
-  timing: capture 0.31s  screenshot 0.28s  app 0.01s  field 0.01s  url 0.01s  ocr 0.82s  ax 0.06s  decide 0.21s  act 0.05s  total 1.45s
+  timing: capture 0.31s  screenshot 0.28s  app 0.01s  window 0.02s  field 0.01s  url 0.01s  ocr 0.31s (22% of screen)  ax 0.06s  decide 0.21s  act 0.05s  total 0.95s
 ```
 
 `capture` covers the four round trips under it; `act` is left out when the step did not act.
@@ -207,8 +226,9 @@ uv run clicker "same goal" --image runs/<ts>/step-03-raw.png --app "Google Chrom
 typesafe_computer_use/
   macos.py        the only module that touches Quartz, AX, AppleScript   (platform adapter)
                   including the bounded walk for actionable elements
-  perception.py   capture, OCR, block merging, goal-echo filter, the
-                  accessibility item source, and the merge of the two
+  perception.py   capture, OCR, the read region and the changed-tile cache,
+                  block merging, goal-echo filter, the accessibility item
+                  source, and the merge of the two
   dates.py        date parsing and "in N days" hints
   decide.py       state, criteria, the three-Choice request, the Noul check
   writer.py       the writer model, structured replies, URL validation

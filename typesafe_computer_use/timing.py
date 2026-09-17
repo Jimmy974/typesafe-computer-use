@@ -6,7 +6,8 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-PHASE_ORDER = ("capture", "screenshot", "app", "field", "url", "ocr", "ax", "decide", "act", "total")
+PHASE_ORDER = ("capture", "screenshot", "app", "window", "field", "url", "ocr", "ax", "decide", "act", "total")
+OCR_REGION_PCT = "ocr_region_pct"  # a percentage, not seconds: printed on the ocr phase rather than as its own
 
 
 @contextmanager
@@ -27,9 +28,17 @@ def ordered(timing: dict[str, float]) -> list[tuple[str, float]]:
 
 
 def format_timing(timing: dict[str, float]) -> str:
-    """One log line. A zero `act` means the step never acted, so it is left out."""
-    shown = [(name, s) for name, s in ordered(timing) if not (name == "act" and s == 0)]
-    return "  timing: " + "  ".join(f"{name} {seconds:.2f}s" for name, seconds in shown)
+    """One log line. A zero `act` means the step never acted, so it is left out.
+
+    The share of the capture that was OCRed rides on the `ocr` phase: `ocr 0.31s (22% of screen)`.
+    """
+    pct = timing.get(OCR_REGION_PCT)
+    shown = [(name, s) for name, s in ordered(timing) if name != OCR_REGION_PCT and not (name == "act" and s == 0)]
+    parts = [
+        f"{name} {seconds:.2f}s" + (f" ({pct:.0f}% of screen)" if name == "ocr" and pct is not None else "")
+        for name, seconds in shown
+    ]
+    return "  timing: " + "  ".join(parts)
 
 
 def summarize(timings: list[dict[str, float]]) -> dict:

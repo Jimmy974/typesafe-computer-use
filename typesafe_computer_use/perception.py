@@ -6,17 +6,27 @@ from dataclasses import replace
 from pathlib import Path
 
 from ocrmac import ocrmac
-from PIL import Image
+from PIL import Image, ImageChops, ImageStat
 
 from . import macos
 from .config import MAX_OPTIONS, MIN_OCR_CONFIDENCE
 from .models import AxNode, Box, Item, Screen
-from .timing import phase
+from .timing import OCR_REGION_PCT, phase
 
 Line = tuple[str, float, Box]
 ECHO_CHARS = 24
 MIN_BOX_OVERLAP = 0.5  # intersection over the smaller box
 MIN_TOKEN_OVERLAP = 0.5
+
+# OCR costs about two thirds of a step, and it scales with the amount of text, so the way to make it
+# cheaper is to read less of the screen: the frontmost window instead of the display, and within it
+# only the tiles that changed since the previous capture.
+MENU_BAR_PT = 40.0  # the strip above every window, which the app's own menus live in
+REGION_MARGIN_PT = 8.0  # slack around the window, for the shadow and a clipped glyph
+THUMB_DIVISOR = 8  # the change detector works on a 1/8 scale grayscale copy
+TILE_PX = 256.0  # tile side in capture pixels
+TILE_DIFF = 6.0  # mean absolute 8-bit difference that counts a tile as changed
+REOCR_FRACTION = 0.6  # above this share of changed tiles, reading the whole region is cheaper
 
 # Accessibility roles as one human word. Anything unlisted is "other".
 ROLE_WORDS = {
@@ -49,7 +59,7 @@ def capture(
     """Capture the main display, or load a saved capture for replay (then app/url are taken as given).
 
     Each query below is a round trip to the window server, AX, or AppleScript. Pass `timing` to
-    record the seconds each one costs under "screenshot", "app", "field", and "url".
+    record the seconds each one costs under "screenshot", "app", "window", "field", and "url".
     """
     replay = image_path is not None and app is not None
     with phase(timing, "screenshot"):
@@ -60,11 +70,13 @@ def capture(
         else:
             frontmost, pid = macos.frontmost_app_and_pid()
             frontmost = app or frontmost
+    with phase(timing, "window"):
+        window = None if replay else macos.frontmost_window_bounds(pid)
     with phase(timing, "field"):
         field = None if replay else macos.focused_field()
     with phase(timing, "url"):
         page_url = url if url is not None else (None if replay else macos.browser_url(browser))
-    return Screen(image=image, scale=macos.display_scale(image), app=frontmost, field=field, url=page_url, pid=pid)
+    return Screen(image=image, scale=macos.display_scale(image), app=frontmost, field=field, url=page_url, pid=pid, window=window)
 
 
 def goal_echoes(goal: str) -> set[str]:
@@ -78,15 +90,24 @@ def is_echo(text: str, echoes: set[str]) -> bool:
     return any(e in norm for e in echoes)
 
 
-def perceive(screen: Screen, budget: int, goal: str, timing: dict[str, float] | None = None) -> list[Item]:
+def perceive(
+    screen: Screen,
+    budget: int,
+    goal: str,
+    timing: dict[str, float] | None = None,
+    cache: OcrCache | None = None,
+) -> list[Item]:
     """Everything worth clicking on this screen: OCR text blocks, plus the app's own controls.
 
     Fills `screen.ax_refs` on the way, so an item that came from the accessibility tree can be
     pressed through it later. The merge renumbers everything, hence the side table over the
     final indices rather than a handle on the item itself, which has to stay printable.
+
+    A `cache` carries the previous capture's OCR, so only the tiles that changed are read again.
+    Pass None to read the whole region every time, which is what a replay and an inspection do.
     """
     with phase(timing, "ocr"):
-        blocks = ocr(screen, budget, goal)
+        blocks = ocr(screen, budget, goal, cache, timing)
     with phase(timing, "ax"):
         nodes = ax_nodes(screen, budget)
         controls = to_ax_items(nodes, screen.scale)
@@ -96,11 +117,228 @@ def perceive(screen: Screen, budget: int, goal: str, timing: dict[str, float] | 
     return [it for it, _ in merged]
 
 
-def ocr(screen: Screen, budget: int, goal: str) -> list[Item]:
-    raw = ocrmac.OCR(screen.image, recognition_level="accurate").recognize(px=True)
+def ocr(
+    screen: Screen,
+    budget: int,
+    goal: str,
+    cache: OcrCache | None = None,
+    timing: dict[str, float] | None = None,
+) -> list[Item]:
+    """The screen's text as items, filtered and merged into blocks.
+
+    The filter runs over the raw lines every step, including the reused ones, so a cached line is
+    treated exactly as a freshly read one.
+    """
+    lines, read_pct = ocr_lines(screen, cache)
+    if timing is not None:
+        timing[OCR_REGION_PCT] = round(read_pct, 1)
     echoes = goal_echoes(goal)
-    lines: list[Line] = [(t.strip(), c, b) for t, c, b in raw if t.strip() and c >= MIN_OCR_CONFIDENCE and not is_echo(t, echoes)]
-    return to_items(merge_blocks(lines), budget)
+    kept: list[Line] = [
+        (t.strip(), c, b) for t, c, b in lines if t.strip() and c >= MIN_OCR_CONFIDENCE and not is_echo(t, echoes)
+    ]
+    return to_items(merge_blocks(kept), budget)
+
+
+# ------------------------------------------------------------------ reading less of the screen
+
+
+class OcrCache:
+    """The previous capture's OCR, and what makes it reusable.
+
+    Holds a reduced grayscale copy of the capture, to find what moved, and the raw lines before
+    merging and filtering, in full-capture pixels. One cache belongs to one run.
+    """
+
+    def __init__(self) -> None:
+        self.app: str | None = None
+        self.window: tuple[float, float, float, float] | None = None
+        self.region: Box | None = None
+        self.thumb: Image.Image | None = None
+        self.lines: list[Line] = []
+
+    def reusable(self, screen: Screen, region: Box, thumb: Image.Image) -> bool:
+        """Never across a different app, a moved or resized window, or a different read region."""
+        return (
+            self.thumb is not None
+            and self.thumb.size == thumb.size
+            and self.app == screen.app
+            and self.window == screen.window
+            and self.region == region
+        )
+
+    def store(self, screen: Screen, region: Box, thumb: Image.Image, lines: list[Line]) -> None:
+        self.app, self.window, self.region, self.thumb, self.lines = screen.app, screen.window, region, thumb, list(lines)
+
+
+def ocr_lines(screen: Screen, cache: OcrCache | None = None) -> tuple[list[Line], float]:
+    """Raw OCR lines for this capture in full-capture pixels, and the percentage of it that was read.
+
+    Without a cache this reads the region once. With one it reads only the rectangle covering the
+    tiles that changed, unless too much of the screen moved, in which case the whole region is
+    cheaper than stitching. A line the re-read rectangle touches is dropped and read again whole,
+    because Vision segments a crop slightly differently from the full image.
+    """
+    region = ocr_region(screen)
+    area = float(max(1, screen.image.width * screen.image.height))
+
+    def read_pct(rect: Box) -> float:
+        return 100.0 * (rect[2] - rect[0]) * (rect[3] - rect[1]) / area
+
+    if cache is None:
+        return ocr_crop(screen.image, region), read_pct(region)
+
+    thumb = thumbnail(screen.image)
+    if not cache.reusable(screen, region, thumb):
+        return _read_region(screen, region, thumb, cache), read_pct(region)
+    tiles = tiles_in(region)
+    changed = changed_tiles(thumb, cache.thumb, tiles)
+    if len(changed) > REOCR_FRACTION * len(tiles):
+        return _read_region(screen, region, thumb, cache), read_pct(region)
+    rect = reocr_rect(changed, region)
+    if rect is None:
+        cache.store(screen, region, thumb, cache.lines)
+        return cache.lines, 0.0
+    rect = grown_for_lines(rect, cache.lines, region)
+    if area_of(rect) > REOCR_FRACTION * area_of(region):
+        return _read_region(screen, region, thumb, cache), read_pct(region)
+    lines = merge_reocr(cache.lines, ocr_crop(screen.image, rect), rect)
+    cache.store(screen, region, thumb, lines)
+    return lines, read_pct(rect)
+
+
+def _read_region(screen: Screen, region: Box, thumb: Image.Image, cache: OcrCache) -> list[Line]:
+    lines = ocr_crop(screen.image, region)
+    cache.store(screen, region, thumb, lines)
+    return lines
+
+
+def ocr_region(screen: Screen) -> Box:
+    """The part of the capture worth reading, in capture pixels.
+
+    The frontmost window with a margin, joined with the menu bar strip and clamped to the display.
+    Text on the desktop and in background windows is noise to the decision, so it is left unread.
+    The menu bar spans the display, so the union with it always reaches both side edges.
+    """
+    width, height = float(screen.image.width), float(screen.image.height)
+    if screen.window is None:
+        return (0.0, 0.0, width, height)
+    x, y, w, h = screen.window
+    scale, margin = screen.scale, REGION_MARGIN_PT
+    window = ((x - margin) * scale, (y - margin) * scale, (x + w + margin) * scale, (y + h + margin) * scale)
+    menu = (0.0, 0.0, width, MENU_BAR_PT * scale)
+    joined = (min(window[0], menu[0]), min(window[1], menu[1]), max(window[2], menu[2]), max(window[3], menu[3]))
+    clamped = (max(0.0, joined[0]), max(0.0, joined[1]), min(width, joined[2]), min(height, joined[3]))
+    return clamped if clamped[2] > clamped[0] and clamped[3] > clamped[1] else (0.0, 0.0, width, height)
+
+
+def ocr_crop(image: Image.Image, rect: Box) -> list[Line]:
+    """OCR one rectangle of the capture. Boxes come back in full-capture pixels, so nothing downstream
+    knows a crop happened."""
+    x1, y1, x2, y2 = (round(v) for v in rect)
+    crop = image if (x1, y1, x2, y2) == (0, 0, image.width, image.height) else image.crop((x1, y1, x2, y2))
+    raw = ocrmac.OCR(crop, recognition_level="accurate").recognize(px=True)
+    return [(text, conf, (b[0] + x1, b[1] + y1, b[2] + x1, b[3] + y1)) for text, conf, b in raw]
+
+
+def thumbnail(image: Image.Image, divisor: int = THUMB_DIVISOR) -> Image.Image:
+    """A grayscale copy at 1/divisor scale. Box-averaged, so it costs a few milliseconds and smooths
+    away the compression noise that would otherwise read as a change."""
+    return image.convert("L").reduce(divisor)
+
+
+def tiles_in(region: Box, tile: float = TILE_PX) -> list[Box]:
+    """The region cut into tiles aligned to its own origin. The last row and column are short."""
+    x1, y1, x2, y2 = region
+    out: list[Box] = []
+    y = y1
+    while y < y2:
+        x = x1
+        while x < x2:
+            out.append((x, y, min(x + tile, x2), min(y + tile, y2)))
+            x += tile
+        y += tile
+    return out
+
+
+def tile_changed(
+    thumb: Image.Image,
+    previous: Image.Image,
+    tile: Box,
+    divisor: int = THUMB_DIVISOR,
+    threshold: float = TILE_DIFF,
+) -> bool:
+    """True when the tile's mean absolute pixel difference clears the threshold. A tile whose patch
+    cannot be compared counts as changed, so a doubt is always paid for with a re-read."""
+    a, b = _patch(thumb, tile, divisor), _patch(previous, tile, divisor)
+    if a.size != b.size or not a.width or not a.height:
+        return True
+    return ImageStat.Stat(ImageChops.difference(a, b)).mean[0] > threshold
+
+
+def _patch(thumb: Image.Image, tile: Box, divisor: int) -> Image.Image:
+    x1, y1, x2, y2 = (round(v / divisor) for v in tile)
+    return thumb.crop((x1, y1, max(x2, x1 + 1), max(y2, y1 + 1)))
+
+
+def changed_tiles(
+    thumb: Image.Image,
+    previous: Image.Image,
+    tiles: list[Box],
+    divisor: int = THUMB_DIVISOR,
+    threshold: float = TILE_DIFF,
+) -> list[Box]:
+    return [tile for tile in tiles if tile_changed(thumb, previous, tile, divisor, threshold)]
+
+
+def reocr_rect(changed: list[Box], region: Box, tile: float = TILE_PX) -> Box | None:
+    """The rectangle to read again: the changed tiles' bounding box, padded by one tile so a line
+    crossing the edge is read whole, clamped to the region. None when nothing changed."""
+    if not changed:
+        return None
+    x1 = min(b[0] for b in changed) - tile
+    y1 = min(b[1] for b in changed) - tile
+    x2 = max(b[2] for b in changed) + tile
+    y2 = max(b[3] for b in changed) + tile
+    return (max(region[0], x1), max(region[1], y1), min(region[2], x2), min(region[3], y2))
+
+
+def area_of(box: Box) -> float:
+    return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+
+
+def grown_for_lines(rect: Box, lines: list[Line], region: Box) -> Box:
+    """The rectangle grown until no known line straddles its edge, clamped to the region.
+
+    A crop cuts a line in half, and Vision reads the visible half as its own line, so a rectangle
+    that ends mid-line would trade a whole headline for a fragment. Reading a larger rectangle is
+    the cheaper mistake.
+    """
+    x1, y1, x2, y2 = rect
+    growing = True
+    while growing:
+        growing = False
+        for _, _, box in lines:
+            if not boxes_intersect(box, (x1, y1, x2, y2)):
+                continue
+            grown = (
+                max(region[0], min(x1, box[0])),
+                max(region[1], min(y1, box[1])),
+                min(region[2], max(x2, box[2])),
+                min(region[3], max(y2, box[3])),
+            )
+            if grown != (x1, y1, x2, y2):
+                x1, y1, x2, y2 = grown
+                growing = True
+    return (x1, y1, x2, y2)
+
+
+def boxes_intersect(a: Box, b: Box) -> bool:
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def merge_reocr(previous: list[Line], fresh: list[Line], rect: Box) -> list[Line]:
+    """Previous lines the re-read rectangle does not touch, plus every line just read inside it."""
+    return [ln for ln in previous if not boxes_intersect(ln[2], rect)] + list(fresh)
 
 
 def ax_nodes(screen: Screen, budget: int) -> list[AxNode]:

@@ -30,6 +30,11 @@ def test_format_line_shows_two_decimals_in_pipeline_order():
     assert line == "  timing: capture 0.31s  ocr 0.82s  decide 0.21s  act 0.05s  total 1.45s"
 
 
+def test_format_line_shows_the_share_of_the_screen_that_was_ocred():
+    line = format_timing({"capture": 0.31, "ocr": 0.31, "ocr_region_pct": 22.4, "total": 0.9})
+    assert line == "  timing: capture 0.31s  ocr 0.31s (22% of screen)  total 0.90s"
+
+
 def test_format_line_omits_act_when_the_step_did_not_act():
     assert "act" not in format_timing({"capture": 0.3, "ocr": 0.8, "decide": 0.2, "act": 0.0, "total": 1.3})
 

@@ -14,7 +14,7 @@ from .actions import Context, is_noop, perform
 from .config import DEFAULT_DELAY, DEFAULT_MIN_CONFIDENCE, DEFAULT_STEPS, MAX_OPTIONS
 from .decide import Decision, decide
 from .models import Abort, Item, Screen
-from .perception import capture, perceive
+from .perception import OcrCache, capture, perceive
 from .report import Log, annotate, ax_count, render_payload, top
 from .timing import format_timing, phase, summarize
 
@@ -45,6 +45,7 @@ class RunState:
     consecutive_noops: int = 0
     last_url: str | None = None
     outcome: str = "completed"
+    ocr_cache: OcrCache = field(default_factory=OcrCache)  # carries one step's OCR into the next
 
 
 def run(cfg: RunConfig, ctx_factory) -> RunState:
@@ -91,7 +92,7 @@ def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
     started = time.perf_counter()
     with phase(timing, "capture"):
         screen = capture(cfg.image, cfg.app, cfg.url, ctx.browser, timing)
-    items = perceive(screen, MAX_OPTIONS, cfg.goal, timing)
+    items = perceive(screen, MAX_OPTIONS, cfg.goal, timing, None if cfg.replay else state.ocr_cache)
     prefix = cfg.out / f"step-{step:02d}"
     screen.image.save(prefix.with_name(prefix.name + "-raw.png"))
     prefix.with_name(prefix.name + "-payload.txt").write_text(
