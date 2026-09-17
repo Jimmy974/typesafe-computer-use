@@ -89,9 +89,12 @@ at `--steps`.
 
 ```
 screencapture ─► Vision OCR ─► merge lines into blocks ─► drop lines echoing the goal
+accessibility ─► actionable elements (role, label, frame), pruned to the display
+                     │
+                     └─► one numbered list of items, each carrying its source
                      │
 accessibility ─► focused field (role, label, placeholder, value, frame)
-AppleScript   ─► frontmost app, active tab URL
+AppleScript   ─► frontmost app and pid, active tab URL
 clock         ─► local date and time
 dates.py      ─► "dated 2026-10-13 (in 27 days)" on any block containing a date,
                  "near a line dated ..." on its neighbours
@@ -100,7 +103,7 @@ dates.py      ─► "dated 2026-10-13 (in 27 days)" on any block containing a d
         one TypeSafe request, three Choices
         ┌──────────────────────────────────────────────────────┐
         │ kind  : click_item | open_site | type_text | scroll… │
-        │ item  : which OCR block (used only for click_item)   │
+        │ item  : which item (used only for click_item)        │
         │ site  : which catalog site (used only for open_site) │
         └──────────────────────────────────────────────────────┘
                      │
@@ -108,16 +111,46 @@ dates.py      ─► "dated 2026-10-13 (in 27 days)" on any block containing a d
         deterministic action ─► wait ─► next step
 ```
 
+Items carry where they came from: `ocr` for a text block, `ax` for a control the app
+declared, `ax+ocr` when both found the same thing. An `ax` item reads as
+`button 'Share' (top-right)` in the criteria, so the classifier can tell a real control
+from a line of text.
+
 Splitting the decision into three questions keeps screen noise out of the action
 choice. Every stall found while building this came from two options that meant the
 same thing. Confidence measures concentration, so overlapping options always read as
 doubt. Keep the action set mutually exclusive.
 
+### Accessibility tree
+
+OCR cannot see an icon. The accessibility tree can, so each step also walks the frontmost
+process for labelled, on-screen controls. Coverage is uneven, measured on ten apps on one
+Mac: Finder 100% of on-screen controls labelled, Chrome 88%, Slack 85%, Notion 68%,
+Spotify 0 (its CEF shell exposes three window buttons and nothing else). Terminals expose
+the grid as one text area. So AX is a bonus source, never a replacement.
+
+Labels live in `AXDescription` for web and Electron, `AXTitle` for AppKit, and a short
+`AXValue` otherwise. A decorative image takes the label of the control around it; a list
+row takes it from a shallow `AXStaticText`.
+
+Frames lie, so the walk prunes hard:
+
+- skip any subtree whose real frame misses the display (Notes reports rows 200 screens
+  down, Chrome parks scrolled-out nodes above the viewport)
+- skip any node under 4 pt wide or tall (Chromium clamps scrolled-out web nodes to slivers)
+- skip `AXMenu` subtrees, which are thousands of zero-sized items behind a closed menu
+- skip nameless `AXGroup` layout boxes, even pressable ones
+- stop at 4000 nodes or 0.6 s and say so
+
+Walks measured here: Finder 152 controls in 0.08 s, Chrome 172 in 0.59 s. The assistive
+handshake attributes (`AXManualAccessibility`, `AXEnhancedUserInterface`) are unsupported
+on this macOS, so nothing relies on them.
+
 ### Action space
 
 | key | does |
 |---|---|
-| `click_item` | click the center of the chosen OCR block, converted from Retina pixels to points |
+| `click_item` | click the center of the chosen item, converted from Retina pixels to points |
 | `open_site` | AppleScript `open location` for a `SITES` catalog entry, or a URL the writer proposes |
 | `switch_to_browser` | bring the browser forward to continue with a page already open there |
 | `type_text` | the writer composes the string; a TypeSafe Noul then checks the field's value |
@@ -150,14 +183,14 @@ Every run writes `runs/<timestamp>/` so a stall can be replayed and fixed offlin
 |---|---|
 | `run.log`, `run.json` | everything printed; goal, outcome, seconds, every action, config, and `timing` (mean and max seconds per phase, with `steps_timed`) |
 | `step-NN-raw.png` | the capture |
-| `step-NN.png` | OCR blocks numbered in blue, the chosen one red, the focused field green |
-| `step-NN-payload.txt` | the exact `state` and criteria sent to TypeSafe, then every block with box, click point, confidence |
+| `step-NN.png` | items numbered in blue, accessibility ones orange, the chosen one red, the focused field green |
+| `step-NN-payload.txt` | the exact `state` and criteria sent to TypeSafe, then every item with source, role, box, click point, confidence |
 | `step-NN-answers.json` | every probability the classifier returned, plus `timing` for that step |
 
 Each step also logs what it cost, so a slow phase is obvious:
 
 ```
-  timing: capture 0.31s  screenshot 0.28s  app 0.01s  field 0.01s  url 0.01s  ocr 0.82s  decide 0.21s  act 0.05s  total 1.45s
+  timing: capture 0.31s  screenshot 0.28s  app 0.01s  field 0.01s  url 0.01s  ocr 0.82s  ax 0.06s  decide 0.21s  act 0.05s  total 1.45s
 ```
 
 `capture` covers the four round trips under it; `act` is left out when the step did not act.
@@ -173,7 +206,9 @@ uv run clicker "same goal" --image runs/<ts>/step-03-raw.png --app "Google Chrom
 ```
 typesafe_computer_use/
   macos.py        the only module that touches Quartz, AX, AppleScript   (platform adapter)
-  perception.py   capture, OCR, block merging, goal-echo filter
+                  including the bounded walk for actionable elements
+  perception.py   capture, OCR, block merging, goal-echo filter, the
+                  accessibility item source, and the merge of the two
   dates.py        date parsing and "in N days" hints
   decide.py       state, criteria, the three-Choice request, the Noul check
   writer.py       the writer model, structured replies, URL validation
@@ -182,15 +217,18 @@ typesafe_computer_use/
   report.py       logging, annotated screenshots, payload dump
   timing.py       phase stopwatches, the timing line, run summary
   cli.py          `clicker` and `clicker-inspect`
-tests/            pure logic: dates, merging, reading order, echo filter, config, decisions
+tests/            pure logic: dates, merging, reading order, echo filter, config,
+                  decisions, the tree walk against a fake tree
 ```
 
 A Linux port replaces `macos.py` with xdotool and AT-SPI, and swaps Vision OCR for
-PaddleOCR or RapidOCR. Nothing else knows the platform.
+PaddleOCR or RapidOCR. The tree walk itself takes its children, attributes, and actions
+as callables, so only those three bindings change. Nothing else knows the platform.
 
 ## Known limits
 
-- OCR only sees text. Icon-only buttons and text over photos are invisible or garbled.
+- OCR only sees text, and the accessibility tree only covers apps that publish one.
+  In a terminal, a canvas, or Spotify, an icon-only button reaches neither source.
 - Two identical labels get only a coarse region hint and split the vote.
 - Only the main display is captured.
 - Using the machine during an `--act` run fights it for focus and the cursor.

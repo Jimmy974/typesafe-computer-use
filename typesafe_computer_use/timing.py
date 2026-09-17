@@ -6,7 +6,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-PHASE_ORDER = ("capture", "screenshot", "app", "field", "url", "ocr", "decide", "act", "total")
+PHASE_ORDER = ("capture", "screenshot", "app", "field", "url", "ocr", "ax", "decide", "act", "total")
 
 
 @contextmanager

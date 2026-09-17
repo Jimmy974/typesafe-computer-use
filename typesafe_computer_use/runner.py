@@ -14,8 +14,8 @@ from .actions import Context, is_noop, perform
 from .config import DEFAULT_DELAY, DEFAULT_MIN_CONFIDENCE, DEFAULT_STEPS, MAX_OPTIONS
 from .decide import Decision, decide
 from .models import Abort, Item, Screen
-from .perception import capture, ocr
-from .report import Log, annotate, render_payload, top
+from .perception import capture, perceive
+from .report import Log, annotate, ax_count, render_payload, top
 from .timing import format_timing, phase, summarize
 
 MAX_CONSECUTIVE_NOOPS = 2
@@ -91,8 +91,7 @@ def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
     started = time.perf_counter()
     with phase(timing, "capture"):
         screen = capture(cfg.image, cfg.app, cfg.url, ctx.browser, timing)
-    with phase(timing, "ocr"):
-        items = ocr(screen, MAX_OPTIONS, cfg.goal)
+    items = perceive(screen, MAX_OPTIONS, cfg.goal, timing)
     prefix = cfg.out / f"step-{step:02d}"
     screen.image.save(prefix.with_name(prefix.name + "-raw.png"))
     prefix.with_name(prefix.name + "-payload.txt").write_text(
@@ -106,7 +105,7 @@ def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
 
     field_desc = f" field={screen.field.role}:{screen.field.label!r}" if screen.field else ""
     log(
-        f"\nstep {step}: app={screen.app!r}{field_desc} url={screen.url!r} items={len(items)} "
+        f"\nstep {step}: app={screen.app!r}{field_desc} url={screen.url!r} items={len(items)} ax={ax_count(items)} "
         f"kind={decision.kind.choice} ({decision.kind.confidence:.2f}) site={decision.site.choice}"
     )
     for key, p in top(decision.kind, 4):

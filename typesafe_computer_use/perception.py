@@ -1,19 +1,42 @@
-"""Turn the display into text blocks with pixel boxes."""
+"""Turn the display into clickable items: OCR text blocks and accessibility controls."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from ocrmac import ocrmac
 from PIL import Image
 
 from . import macos
-from .config import MIN_OCR_CONFIDENCE
+from .config import MAX_OPTIONS, MIN_OCR_CONFIDENCE
 from .models import Box, Item, Screen
 from .timing import phase
 
 Line = tuple[str, float, Box]
 ECHO_CHARS = 24
+MIN_BOX_OVERLAP = 0.5  # intersection over the smaller box
+MIN_TOKEN_OVERLAP = 0.5
+
+# Accessibility roles as one human word. Anything unlisted is "other".
+ROLE_WORDS = {
+    "AXButton": "button",
+    "AXCell": "cell",
+    "AXCheckBox": "checkbox",
+    "AXComboBox": "field",
+    "AXImage": "image",
+    "AXLink": "link",
+    "AXMenuBarItem": "menu",
+    "AXMenuButton": "button",
+    "AXPopUpButton": "popup",
+    "AXRadioButton": "radio",
+    "AXRow": "cell",
+    "AXSearchField": "field",
+    "AXSlider": "slider",
+    "AXTab": "tab",
+    "AXTextArea": "field",
+    "AXTextField": "field",
+}
 
 
 def capture(
@@ -32,12 +55,16 @@ def capture(
     with phase(timing, "screenshot"):
         image = Image.open(image_path).convert("RGB") if image_path else macos.screenshot()
     with phase(timing, "app"):
-        frontmost = app or macos.frontmost_app()
+        if replay:
+            frontmost, pid = app, None
+        else:
+            frontmost, pid = macos.frontmost_app_and_pid()
+            frontmost = app or frontmost
     with phase(timing, "field"):
         field = None if replay else macos.focused_field()
     with phase(timing, "url"):
         page_url = url if url is not None else (None if replay else macos.browser_url(browser))
-    return Screen(image=image, scale=macos.display_scale(image), app=frontmost, field=field, url=page_url)
+    return Screen(image=image, scale=macos.display_scale(image), app=frontmost, field=field, url=page_url, pid=pid)
 
 
 def goal_echoes(goal: str) -> set[str]:
@@ -51,6 +78,15 @@ def is_echo(text: str, echoes: set[str]) -> bool:
     return any(e in norm for e in echoes)
 
 
+def perceive(screen: Screen, budget: int, goal: str, timing: dict[str, float] | None = None) -> list[Item]:
+    """Everything worth clicking on this screen: OCR text blocks, plus the app's own controls."""
+    with phase(timing, "ocr"):
+        blocks = ocr(screen, budget, goal)
+    with phase(timing, "ax"):
+        controls = ax_items(screen, budget)
+    return merge_sources(blocks, controls, budget)
+
+
 def ocr(screen: Screen, budget: int, goal: str) -> list[Item]:
     raw = ocrmac.OCR(screen.image, recognition_level="accurate").recognize(px=True)
     echoes = goal_echoes(goal)
@@ -58,12 +94,98 @@ def ocr(screen: Screen, budget: int, goal: str) -> list[Item]:
     return to_items(merge_blocks(lines), budget)
 
 
+def ax_items(screen: Screen, budget: int) -> list[Item]:
+    """The frontmost app's labelled controls, converted to capture pixels.
+
+    Icon-only buttons are invisible to OCR and live only here. Accessibility is best effort:
+    a missing pid, a refusing app, or a raising bridge all mean OCR carries the step alone.
+    """
+    if screen.pid is None:
+        return []
+    width_pt, height_pt = screen.size_pt
+    try:
+        nodes, _capped = macos.actionable_elements(screen.pid, width_pt, height_pt)
+    except Exception:
+        return []
+    s = screen.scale
+    return [
+        Item(
+            index=i,
+            text=node.label,
+            ocr_confidence=1.0,
+            x1=node.x * s,
+            y1=node.y * s,
+            x2=(node.x + node.w) * s,
+            y2=(node.y + node.h) * s,
+            role=ROLE_WORDS.get(node.role, "other"),
+            source="ax",
+        )
+        for i, node in enumerate(nodes[:budget])
+        if node.label
+    ]
+
+
+def merge_sources(ocr_items: list[Item], ax_items: list[Item], budget: int = MAX_OPTIONS) -> list[Item]:
+    """One item per thing. An accessibility control that sits on the OCR block naming it replaces both."""
+    taken: set[int] = set()
+    merged: list[Item] = []
+    for control in ax_items:
+        best, best_overlap = None, MIN_BOX_OVERLAP
+        for i, block in enumerate(ocr_items):
+            if i in taken:
+                continue
+            overlap = box_overlap(control, block)
+            if overlap >= best_overlap and texts_match(control.text, block.text):
+                best, best_overlap = i, overlap
+        if best is None:
+            merged.append(control)
+            continue
+        block = ocr_items[best]
+        taken.add(best)
+        text = control.text if len(control.text) >= len(block.text) else block.text
+        merged.append(replace(block, text=text, role=control.role, source="ax+ocr"))
+    merged += [block for i, block in enumerate(ocr_items) if i not in taken]
+    return order_items(within_budget(merged, budget))
+
+
+def box_overlap(a: Item, b: Item) -> float:
+    """Intersection over the smaller box, so a tight control inside a wide text line still counts."""
+    wide = min(a.x2, b.x2) - max(a.x1, b.x1)
+    tall = min(a.y2, b.y2) - max(a.y1, b.y1)
+    smaller = min((a.x2 - a.x1) * (a.y2 - a.y1), (b.x2 - b.x1) * (b.y2 - b.y1))
+    return wide * tall / smaller if wide > 0 and tall > 0 and smaller > 0 else 0.0
+
+
+def texts_match(a: str, b: str) -> bool:
+    """One label contains the other, or they share half their words."""
+    x, y = " ".join(a.lower().split()), " ".join(b.lower().split())
+    if not x or not y:
+        return False
+    if x in y or y in x:
+        return True
+    words_x, words_y = set(x.split()), set(y.split())
+    return len(words_x & words_y) / min(len(words_x), len(words_y)) >= MIN_TOKEN_OVERLAP
+
+
+def within_budget(items: list[Item], budget: int) -> list[Item]:
+    """Over the Choice ceiling, the faintest OCR-only blocks go first; a control is never dropped for text."""
+    if len(items) <= budget:
+        return items
+    ranked = sorted(range(len(items)), key=lambda i: (items[i].from_ax, items[i].ocr_confidence))
+    dropped = set(ranked[: len(items) - budget])
+    return [it for i, it in enumerate(items) if i not in dropped]
+
+
 def to_items(lines: list[Line], budget: int) -> list[Item]:
-    """Number blocks in reading order: rows by the median line height, then left to right."""
-    heights = sorted(b[3] - b[1] for _, _, b in lines) or [1.0]
+    return order_items([Item(0, t, c, *b) for t, c, b in lines])[:budget]
+
+
+def order_items(items: list[Item]) -> list[Item]:
+    """Number items in reading order: rows by the median item height, then left to right."""
+    heights = sorted(it.y2 - it.y1 for it in items) or [1.0]
     row_h = max(1.0, heights[len(heights) // 2])
-    ordered = sorted(lines, key=lambda r: (round((r[2][1] + r[2][3]) / 2 / row_h), r[2][0]))
-    return [Item(i, t, c, *b) for i, (t, c, b) in enumerate(ordered[:budget])]
+    ordered = sorted(items, key=lambda it: (round((it.y1 + it.y2) / 2 / row_h), it.x1))
+    return [replace(it, index=i) for i, it in enumerate(ordered)]
 
 
 def merge_blocks(lines: list[Line]) -> list[Line]:
