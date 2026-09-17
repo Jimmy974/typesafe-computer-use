@@ -126,19 +126,24 @@ doubt. Keep the action set mutually exclusive.
 Vision is about two thirds of a step, and it charges by the amount of text rather than
 the number of pixels, so the only real saving is reading less of the screen.
 
-- **Crop.** Each step reads the frontmost window plus the menu bar strip, with an 8 pt
-  margin, clamped to the display. Text on the desktop and in background windows is noise
-  to the decision. The menu bar spans the display, so the region joined with it is full
-  width and ends under the window: a full-height window saves nothing, a short one saves
-  the band beneath it.
+- **Crop.** Each step reads the frontmost window with an 8 pt margin, plus the menu bar
+  strip over the same columns, clamped to the display. Text on the desktop and in
+  background windows is noise to the decision. Clipping the strip to the window's width is
+  what makes the crop pay on a full-height window. The cost: the clock and the menu extras
+  to the right of the window go unread. They stay clickable through the accessibility tree.
 - **Reuse.** The capture is compared with the previous one at 1/8 scale, in 256 px tiles.
-  Unchanged tiles keep the lines they produced last step, and only the rectangle around
-  the changed tiles is read again. That rectangle grows until no known line straddles its
-  edge, because a crop through a line returns the half it can see. Past 60% changed tiles,
-  or on an app switch or a window move, the whole region is read instead.
+  Unchanged tiles keep the lines they produced last step. The changed tiles are clustered
+  into blobs, sides and corners counting as touching, and each blob becomes a rectangle
+  read on its own. Scattered change is the ordinary case, a clock digit plus one repaint,
+  and one rectangle around both would span the display. Each rectangle grows until no known
+  line straddles its edge, because a crop through a line returns the half it can see; ones
+  that meet after growing merge, and more than four merge by closest pair down to four.
+  Past 60% changed tiles, past 60% of the region in summed rectangle area, or on an app
+  switch or a window move, the whole region is read instead.
 
-The timing line says how much was read: `ocr 0.31s (22% of screen)`. A replay (`--image`)
-always reads the whole image and never reuses, so an offline repro matches the original run.
+The timing line says how much was read, and in how many pieces: `ocr 0.31s (22% of screen,
+2 rects)`. A replay (`--image`) always reads the whole image and never reuses, so an offline
+repro matches the original run.
 
 ### Accessibility tree
 

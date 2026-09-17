@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -11,7 +12,7 @@ from PIL import Image, ImageChops, ImageStat
 from . import macos
 from .config import MAX_OPTIONS, MIN_OCR_CONFIDENCE
 from .models import AxNode, Box, Item, Screen
-from .timing import OCR_REGION_PCT, phase
+from .timing import OCR_RECTS, OCR_REGION_PCT, phase
 
 Line = tuple[str, float, Box]
 ECHO_CHARS = 24
@@ -19,14 +20,15 @@ MIN_BOX_OVERLAP = 0.5  # intersection over the smaller box
 MIN_TOKEN_OVERLAP = 0.5
 
 # OCR costs about two thirds of a step, and it scales with the amount of text, so the way to make it
-# cheaper is to read less of the screen: the frontmost window instead of the display, and within it
-# only the tiles that changed since the previous capture.
+# cheaper is to read less of the screen: the frontmost window's own columns instead of the display,
+# and within them only the blobs of tiles that changed since the previous capture, one crop each.
 MENU_BAR_PT = 40.0  # the strip above every window, which the app's own menus live in
 REGION_MARGIN_PT = 8.0  # slack around the window, for the shadow and a clipped glyph
 THUMB_DIVISOR = 8  # the change detector works on a 1/8 scale grayscale copy
 TILE_PX = 256.0  # tile side in capture pixels
 TILE_DIFF = 6.0  # mean absolute 8-bit difference that counts a tile as changed
 REOCR_FRACTION = 0.6  # above this share of changed tiles, reading the whole region is cheaper
+MAX_REOCR_RECTS = 4  # past this, the per-call overhead outweighs the pixels another rectangle saves
 
 # Accessibility roles as one human word. Anything unlisted is "other".
 ROLE_WORDS = {
@@ -129,9 +131,10 @@ def ocr(
     The filter runs over the raw lines every step, including the reused ones, so a cached line is
     treated exactly as a freshly read one.
     """
-    lines, read_pct = ocr_lines(screen, cache)
+    lines, read_pct, rects = ocr_lines(screen, cache)
     if timing is not None:
         timing[OCR_REGION_PCT] = round(read_pct, 1)
+        timing[OCR_RECTS] = rects
     echoes = goal_echoes(goal)
     kept: list[Line] = [
         (t.strip(), c, b) for t, c, b in lines if t.strip() and c >= MIN_OCR_CONFIDENCE and not is_echo(t, echoes)
@@ -170,40 +173,40 @@ class OcrCache:
         self.app, self.window, self.region, self.thumb, self.lines = screen.app, screen.window, region, thumb, list(lines)
 
 
-def ocr_lines(screen: Screen, cache: OcrCache | None = None) -> tuple[list[Line], float]:
-    """Raw OCR lines for this capture in full-capture pixels, and the percentage of it that was read.
+def ocr_lines(screen: Screen, cache: OcrCache | None = None) -> tuple[list[Line], float, int]:
+    """Raw OCR lines for this capture in full-capture pixels, the share of it read, and how many crops.
 
-    Without a cache this reads the region once. With one it reads only the rectangle covering the
-    tiles that changed, unless too much of the screen moved, in which case the whole region is
-    cheaper than stitching. A line the re-read rectangle touches is dropped and read again whole,
-    because Vision segments a crop slightly differently from the full image.
+    Without a cache this reads the region once. With one it reads only the rectangles covering the
+    tiles that changed, one Vision call each, unless too much of the screen moved, in which case the
+    whole region is cheaper than stitching. A line a re-read rectangle touches is dropped and read
+    again whole, because Vision segments a crop slightly differently from the full image.
     """
     region = ocr_region(screen)
     area = float(max(1, screen.image.width * screen.image.height))
 
-    def read_pct(rect: Box) -> float:
-        return 100.0 * (rect[2] - rect[0]) * (rect[3] - rect[1]) / area
+    def read_pct(rects: list[Box]) -> float:
+        return 100.0 * sum(area_of(rect) for rect in rects) / area
 
     if cache is None:
-        return ocr_crop(screen.image, region), read_pct(region)
+        return ocr_crop(screen.image, region), read_pct([region]), 0
 
     thumb = thumbnail(screen.image)
     if not cache.reusable(screen, region, thumb):
-        return _read_region(screen, region, thumb, cache), read_pct(region)
+        return _read_region(screen, region, thumb, cache), read_pct([region]), 0
     tiles = tiles_in(region)
     changed = changed_tiles(thumb, cache.thumb, tiles)
     if len(changed) > REOCR_FRACTION * len(tiles):
-        return _read_region(screen, region, thumb, cache), read_pct(region)
-    rect = reocr_rect(changed, region)
-    if rect is None:
+        return _read_region(screen, region, thumb, cache), read_pct([region]), 0
+    rects = reocr_rects(changed, region, cache.lines)
+    if not rects:
         cache.store(screen, region, thumb, cache.lines)
-        return cache.lines, 0.0
-    rect = grown_for_lines(rect, cache.lines, region)
-    if area_of(rect) > REOCR_FRACTION * area_of(region):
-        return _read_region(screen, region, thumb, cache), read_pct(region)
-    lines = merge_reocr(cache.lines, ocr_crop(screen.image, rect), rect)
+        return cache.lines, 0.0, 0
+    if sum(area_of(rect) for rect in rects) > REOCR_FRACTION * area_of(region):
+        return _read_region(screen, region, thumb, cache), read_pct([region]), 0
+    fresh = [ln for rect in rects for ln in ocr_crop(screen.image, rect)]
+    lines = merge_reocr(cache.lines, fresh, rects)
     cache.store(screen, region, thumb, lines)
-    return lines, read_pct(rect)
+    return lines, read_pct(rects), len(rects)
 
 
 def _read_region(screen: Screen, region: Box, thumb: Image.Image, cache: OcrCache) -> list[Line]:
@@ -215,9 +218,13 @@ def _read_region(screen: Screen, region: Box, thumb: Image.Image, cache: OcrCach
 def ocr_region(screen: Screen) -> Box:
     """The part of the capture worth reading, in capture pixels.
 
-    The frontmost window with a margin, joined with the menu bar strip and clamped to the display.
-    Text on the desktop and in background windows is noise to the decision, so it is left unread.
-    The menu bar spans the display, so the union with it always reaches both side edges.
+    The frontmost window with a margin, joined with the menu bar strip over the same columns and
+    clamped to the display. Text on the desktop and in background windows is noise to the decision,
+    so it is left unread. Clipping the strip to the window's x-range is what makes the crop worth
+    anything on a full-height window, whose own rectangle already reaches the bottom of the display.
+
+    The cost is that status items to the right of the window, the clock and the menu extras, go
+    unread. They stay clickable: the accessibility tree lists them as AXMenuBarItem controls.
     """
     width, height = float(screen.image.width), float(screen.image.height)
     if screen.window is None:
@@ -225,8 +232,7 @@ def ocr_region(screen: Screen) -> Box:
     x, y, w, h = screen.window
     scale, margin = screen.scale, REGION_MARGIN_PT
     window = ((x - margin) * scale, (y - margin) * scale, (x + w + margin) * scale, (y + h + margin) * scale)
-    menu = (0.0, 0.0, width, MENU_BAR_PT * scale)
-    joined = (min(window[0], menu[0]), min(window[1], menu[1]), max(window[2], menu[2]), max(window[3], menu[3]))
+    joined = (window[0], min(window[1], 0.0), window[2], max(window[3], MENU_BAR_PT * scale))
     clamped = (max(0.0, joined[0]), max(0.0, joined[1]), min(width, joined[2]), min(height, joined[3]))
     return clamped if clamped[2] > clamped[0] and clamped[3] > clamped[1] else (0.0, 0.0, width, height)
 
@@ -290,16 +296,111 @@ def changed_tiles(
     return [tile for tile in tiles if tile_changed(thumb, previous, tile, divisor, threshold)]
 
 
-def reocr_rect(changed: list[Box], region: Box, tile: float = TILE_PX) -> Box | None:
-    """The rectangle to read again: the changed tiles' bounding box, padded by one tile so a line
-    crossing the edge is read whole, clamped to the region. None when nothing changed."""
-    if not changed:
-        return None
-    x1 = min(b[0] for b in changed) - tile
-    y1 = min(b[1] for b in changed) - tile
-    x2 = max(b[2] for b in changed) + tile
-    y2 = max(b[3] for b in changed) + tile
+def tile_clusters(changed: list[Box], tile: float = TILE_PX) -> list[list[Box]]:
+    """The changed tiles grouped into blobs that touch along a side or at a corner.
+
+    Scattered change is the ordinary case: the menu bar clock ticks a digit while one panel
+    repaints. A single bounding box around both spans the display and forces a full read, where
+    two boxes leave everything between them alone.
+    """
+    parent = list(range(len(changed)))
+
+    def root(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i, a in enumerate(changed):
+        for j, b in enumerate(changed[i + 1 :], start=i + 1):
+            if abs(a[0] - b[0]) <= 1.5 * tile and abs(a[1] - b[1]) <= 1.5 * tile:
+                parent[root(i)] = root(j)
+    blobs: dict[int, list[Box]] = {}
+    for i, box in enumerate(changed):
+        blobs.setdefault(root(i), []).append(box)
+    return list(blobs.values())
+
+
+def reocr_rects(
+    changed: list[Box],
+    region: Box,
+    lines: list[Line],
+    limit: int = MAX_REOCR_RECTS,
+    tile: float = TILE_PX,
+) -> list[Box]:
+    """The rectangles to read again, one Vision call each. Empty when nothing changed.
+
+    One rectangle per blob of changed tiles, each grown until it cuts no known line, the ones that
+    end up touching merged, and the count brought down to `limit` by merging the closest pairs.
+    """
+    rects = settled([blob_rect(blob, region, tile) for blob in tile_clusters(changed, tile)], lines, region)
+    while len(rects) > limit:
+        i, j = closest_pair(rects)
+        rects = settled([union_box(rects[i], rects[j])] + [r for k, r in enumerate(rects) if k not in (i, j)], lines, region)
+    return rects
+
+
+def blob_rect(blob: list[Box], region: Box, tile: float = TILE_PX) -> Box:
+    """One blob's bounding box, padded by a tile so a line crossing the edge is read whole, clamped."""
+    x1 = min(b[0] for b in blob) - tile
+    y1 = min(b[1] for b in blob) - tile
+    x2 = max(b[2] for b in blob) + tile
+    y2 = max(b[3] for b in blob) + tile
     return (max(region[0], x1), max(region[1], y1), min(region[2], x2), min(region[3], y2))
+
+
+def settled(rects: list[Box], lines: list[Line], region: Box) -> list[Box]:
+    """Grow every rectangle past the lines it would cut, merge the ones that meet, until neither moves.
+
+    Growing can push two rectangles together, and a merged rectangle has edges neither original had,
+    which can cut a line neither of them cut. So the two steps run to a fixed point, which they reach:
+    a rectangle only ever grows, bounded by the region, and a merge only ever removes one.
+    """
+    while True:
+        grown = [grown_for_lines(rect, lines, region) for rect in rects]
+        merged = merge_touching(grown)
+        if grown == rects and merged == grown:
+            return merged
+        rects = merged
+
+
+def merge_touching(rects: list[Box]) -> list[Box]:
+    """The rectangles with every overlapping or touching pair replaced by the box around both."""
+    out = list(rects)
+    merged = True
+    while merged:
+        merged = False
+        for i, a in enumerate(out):
+            for j, b in enumerate(out[i + 1 :], start=i + 1):
+                if boxes_touch(a, b):
+                    out = [union_box(a, b)] + [r for k, r in enumerate(out) if k not in (i, j)]
+                    merged = True
+                    break
+            if merged:
+                break
+    return out
+
+
+def closest_pair(rects: list[Box]) -> tuple[int, int]:
+    """Positions of the two rectangles with the smallest gap between them."""
+    _, i, j = min((gap_between(rects[i], rects[j]), i, j) for i in range(len(rects)) for j in range(i + 1, len(rects)))
+    return i, j
+
+
+def gap_between(a: Box, b: Box) -> float:
+    """Distance between two rectangles, zero when they overlap or touch."""
+    dx = max(0.0, max(a[0], b[0]) - min(a[2], b[2]))
+    dy = max(0.0, max(a[1], b[1]) - min(a[3], b[3]))
+    return math.hypot(dx, dy)
+
+
+def union_box(a: Box, b: Box) -> Box:
+    return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+
+
+def boxes_touch(a: Box, b: Box) -> bool:
+    """Overlapping, or meeting along an edge or at a corner: worth reading as one rectangle."""
+    return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
 
 
 def area_of(box: Box) -> float:
@@ -336,9 +437,9 @@ def boxes_intersect(a: Box, b: Box) -> bool:
     return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
 
 
-def merge_reocr(previous: list[Line], fresh: list[Line], rect: Box) -> list[Line]:
-    """Previous lines the re-read rectangle does not touch, plus every line just read inside it."""
-    return [ln for ln in previous if not boxes_intersect(ln[2], rect)] + list(fresh)
+def merge_reocr(previous: list[Line], fresh: list[Line], rects: list[Box]) -> list[Line]:
+    """Previous lines no re-read rectangle touches, plus every line just read inside them."""
+    return [ln for ln in previous if not any(boxes_intersect(ln[2], rect) for rect in rects)] + list(fresh)
 
 
 def ax_nodes(screen: Screen, budget: int) -> list[AxNode]:
