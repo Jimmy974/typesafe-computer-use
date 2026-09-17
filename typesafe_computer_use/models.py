@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 
 from PIL import Image
 
@@ -44,7 +44,11 @@ class Item:
 
 @dataclass(frozen=True)
 class AxNode:
-    """One actionable accessibility element, in screen points."""
+    """One actionable accessibility element, in screen points.
+
+    `ref` is the element itself, the handle an action is sent to. It is opaque here and
+    stays out of equality and repr so a node compares as the facts it reports.
+    """
 
     role: str
     label: str
@@ -53,11 +57,15 @@ class AxNode:
     w: float
     h: float
     pressable: bool
+    ref: object | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
 class Field:
-    """The focused accessibility element, in screen points."""
+    """The focused accessibility element, in screen points.
+
+    `ref` is the element itself, so text can be set on it directly instead of typed.
+    """
 
     role: str
     label: str
@@ -67,10 +75,15 @@ class Field:
     y: float
     w: float
     h: float
+    ref: object | None = field(default=None, compare=False, repr=False)
 
     @property
     def is_text(self) -> bool:
         return self.role in TEXT_ROLES
+
+    def record(self) -> dict:
+        """Everything but the opaque element handle, which no log can serialize."""
+        return {f.name: getattr(self, f.name) for f in fields(self) if f.name != "ref"}
 
     def summary(self) -> dict:
         return {
@@ -91,6 +104,7 @@ class Screen:
     field: Field | None
     url: str | None
     pid: int | None = None  # frontmost process, for the accessibility walk; None in replay
+    ax_refs: dict[int, object] = field(default_factory=dict)  # item index -> accessibility element, when it has one
 
     @property
     def size_pt(self) -> tuple[float, float]:

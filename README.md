@@ -150,11 +150,11 @@ on this macOS, so nothing relies on them.
 
 | key | does |
 |---|---|
-| `click_item` | click the center of the chosen item, converted from Retina pixels to points |
+| `click_item` | press the element through the accessibility tree when the item came from it, so the press lands on the control rather than on whatever covers it; a mouse click at the center of the box otherwise, and as the fallback when the press is refused |
 | `open_site` | AppleScript `open location` for a `SITES` catalog entry, or a URL the writer proposes |
 | `switch_to_browser` | bring the browser forward to continue with a page already open there |
-| `type_text` | the writer composes the string; a TypeSafe Noul then checks the field's value |
-| `type_email` | types `$CLICKER_EMAIL`; refused unless a text field is focused |
+| `type_text` | the writer composes the string; it is set on the focused element through the accessibility tree, with keystrokes as the fallback when the value does not read back, and a TypeSafe Noul then checks the field's value |
+| `type_email` | fills in `$CLICKER_EMAIL` the same way; refused unless a text field is focused |
 | `press_enter`, `press_escape` | keyboard |
 | `scroll_down`, `scroll_up` | 10 lines, after parking the cursor over the frontmost window |
 | `wait` | screen still loading |

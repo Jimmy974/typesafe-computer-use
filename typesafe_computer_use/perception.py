@@ -10,7 +10,7 @@ from PIL import Image
 
 from . import macos
 from .config import MAX_OPTIONS, MIN_OCR_CONFIDENCE
-from .models import Box, Item, Screen
+from .models import AxNode, Box, Item, Screen
 from .timing import phase
 
 Line = tuple[str, float, Box]
@@ -79,12 +79,21 @@ def is_echo(text: str, echoes: set[str]) -> bool:
 
 
 def perceive(screen: Screen, budget: int, goal: str, timing: dict[str, float] | None = None) -> list[Item]:
-    """Everything worth clicking on this screen: OCR text blocks, plus the app's own controls."""
+    """Everything worth clicking on this screen: OCR text blocks, plus the app's own controls.
+
+    Fills `screen.ax_refs` on the way, so an item that came from the accessibility tree can be
+    pressed through it later. The merge renumbers everything, hence the side table over the
+    final indices rather than a handle on the item itself, which has to stay printable.
+    """
     with phase(timing, "ocr"):
         blocks = ocr(screen, budget, goal)
     with phase(timing, "ax"):
-        controls = ax_items(screen, budget)
-    return merge_sources(blocks, controls, budget)
+        nodes = ax_nodes(screen, budget)
+        controls = to_ax_items(nodes, screen.scale)
+    merged = merge_with_origins(blocks, controls, budget)
+    screen.ax_refs.clear()
+    screen.ax_refs.update({it.index: nodes[origin].ref for it, origin in merged if origin is not None and nodes[origin].ref})
+    return [it for it, _ in merged]
 
 
 def ocr(screen: Screen, budget: int, goal: str) -> list[Item]:
@@ -94,8 +103,8 @@ def ocr(screen: Screen, budget: int, goal: str) -> list[Item]:
     return to_items(merge_blocks(lines), budget)
 
 
-def ax_items(screen: Screen, budget: int) -> list[Item]:
-    """The frontmost app's labelled controls, converted to capture pixels.
+def ax_nodes(screen: Screen, budget: int) -> list[AxNode]:
+    """The frontmost app's labelled controls, in screen points.
 
     Icon-only buttons are invisible to OCR and live only here. Accessibility is best effort:
     a missing pid, a refusing app, or a raising bridge all mean OCR carries the step alone.
@@ -107,29 +116,46 @@ def ax_items(screen: Screen, budget: int) -> list[Item]:
         nodes, _capped = macos.actionable_elements(screen.pid, width_pt, height_pt)
     except Exception:
         return []
-    s = screen.scale
+    return [node for node in nodes[:budget] if node.label]
+
+
+def to_ax_items(nodes: list[AxNode], scale: float) -> list[Item]:
+    """Controls as items, converted from screen points to capture pixels."""
     return [
         Item(
             index=i,
             text=node.label,
             ocr_confidence=1.0,
-            x1=node.x * s,
-            y1=node.y * s,
-            x2=(node.x + node.w) * s,
-            y2=(node.y + node.h) * s,
+            x1=node.x * scale,
+            y1=node.y * scale,
+            x2=(node.x + node.w) * scale,
+            y2=(node.y + node.h) * scale,
             role=ROLE_WORDS.get(node.role, "other"),
             source="ax",
         )
-        for i, node in enumerate(nodes[:budget])
-        if node.label
+        for i, node in enumerate(nodes)
     ]
+
+
+def ax_items(screen: Screen, budget: int) -> list[Item]:
+    """The frontmost app's labelled controls as items on the capture."""
+    return to_ax_items(ax_nodes(screen, budget), screen.scale)
 
 
 def merge_sources(ocr_items: list[Item], ax_items: list[Item], budget: int = MAX_OPTIONS) -> list[Item]:
     """One item per thing. An accessibility control that sits on the OCR block naming it replaces both."""
+    return [it for it, _ in merge_with_origins(ocr_items, ax_items, budget)]
+
+
+def merge_with_origins(ocr_items: list[Item], ax_items: list[Item], budget: int = MAX_OPTIONS) -> list[tuple[Item, int | None]]:
+    """The merge, each item paired with the position of the control it came from, or None for plain text.
+
+    The pairing survives the budget cut and the renumbering, which is the only way back from a
+    final item to the accessibility element behind it.
+    """
     taken: set[int] = set()
-    merged: list[Item] = []
-    for control in ax_items:
+    merged: list[tuple[Item, int | None]] = []
+    for origin, control in enumerate(ax_items):
         best, best_overlap = None, MIN_BOX_OVERLAP
         for i, block in enumerate(ocr_items):
             if i in taken:
@@ -138,14 +164,16 @@ def merge_sources(ocr_items: list[Item], ax_items: list[Item], budget: int = MAX
             if overlap >= best_overlap and texts_match(control.text, block.text):
                 best, best_overlap = i, overlap
         if best is None:
-            merged.append(control)
+            merged.append((control, origin))
             continue
         block = ocr_items[best]
         taken.add(best)
         text = control.text if len(control.text) >= len(block.text) else block.text
-        merged.append(replace(block, text=text, role=control.role, source="ax+ocr"))
-    merged += [block for i, block in enumerate(ocr_items) if i not in taken]
-    return order_items(within_budget(merged, budget))
+        merged.append((replace(block, text=text, role=control.role, source="ax+ocr"), origin))
+    merged += [(block, None) for i, block in enumerate(ocr_items) if i not in taken]
+    kept = [merged[i] for i in kept_by_budget([it for it, _ in merged], budget)]
+    order = reading_order([it for it, _ in kept])
+    return [(replace(kept[j][0], index=i), kept[j][1]) for i, j in enumerate(order)]
 
 
 def box_overlap(a: Item, b: Item) -> float:
@@ -167,13 +195,14 @@ def texts_match(a: str, b: str) -> bool:
     return len(words_x & words_y) / min(len(words_x), len(words_y)) >= MIN_TOKEN_OVERLAP
 
 
-def within_budget(items: list[Item], budget: int) -> list[Item]:
-    """Over the Choice ceiling, the faintest OCR-only blocks go first; a control is never dropped for text."""
+def kept_by_budget(items: list[Item], budget: int) -> list[int]:
+    """Which items survive the Choice ceiling: the faintest OCR-only blocks go first,
+    and a control is never dropped for text. Their positions, in the order given."""
     if len(items) <= budget:
-        return items
+        return list(range(len(items)))
     ranked = sorted(range(len(items)), key=lambda i: (items[i].from_ax, items[i].ocr_confidence))
     dropped = set(ranked[: len(items) - budget])
-    return [it for i, it in enumerate(items) if i not in dropped]
+    return [i for i in range(len(items)) if i not in dropped]
 
 
 def to_items(lines: list[Line], budget: int) -> list[Item]:
@@ -182,10 +211,14 @@ def to_items(lines: list[Line], budget: int) -> list[Item]:
 
 def order_items(items: list[Item]) -> list[Item]:
     """Number items in reading order: rows by the median item height, then left to right."""
+    return [replace(items[j], index=i) for i, j in enumerate(reading_order(items))]
+
+
+def reading_order(items: list[Item]) -> list[int]:
+    """Positions of the items in reading order: rows by the median item height, then left to right."""
     heights = sorted(it.y2 - it.y1 for it in items) or [1.0]
     row_h = max(1.0, heights[len(heights) // 2])
-    ordered = sorted(items, key=lambda it: (round((it.y1 + it.y2) / 2 / row_h), it.x1))
-    return [replace(it, index=i) for i, it in enumerate(ordered)]
+    return sorted(range(len(items)), key=lambda i: (round((items[i].y1 + items[i].y2) / 2 / row_h), items[i].x1))
 
 
 def merge_blocks(lines: list[Line]) -> list[Line]:

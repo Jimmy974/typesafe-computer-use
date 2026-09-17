@@ -197,7 +197,47 @@ def focused_field() -> Field | None:
         y=y,
         w=w,
         h=h,
+        ref=element,
     )
+
+
+# ------------------------------------------------------------------ acting on an element
+
+AX_PRESS = "AXPress"
+
+# An element accepts these directly, so a press lands on the control the app declared rather than
+# on whatever pixel happens to sit at its center. Every one of them is best effort: the element may
+# be dead, the app may refuse, and the bridge raises on both. False means "use synthetic input".
+
+
+def ax_press(ref) -> bool:
+    """Send AXPress to an element."""
+    try:
+        return AS.AXUIElementPerformAction(ref, AX_PRESS) == 0
+    except Exception:
+        return False
+
+
+def ax_focus(ref) -> bool:
+    """Give an element the keyboard focus."""
+    try:
+        return AS.AXUIElementSetAttributeValue(ref, AS.kAXFocusedAttribute, True) == 0
+    except Exception:
+        return False
+
+
+def ax_set_value(ref, text: str) -> bool:
+    """Write an element's value. A read-only or unwilling element reports an error."""
+    try:
+        return AS.AXUIElementSetAttributeValue(ref, AS.kAXValueAttribute, text) == 0
+    except Exception:
+        return False
+
+
+def ax_value(ref) -> str | None:
+    """An element's value, when it has a textual one."""
+    value = _ax_attr(ref, AS.kAXValueAttribute)
+    return value if isinstance(value, str) else None
 
 
 # ------------------------------------------------------------------ actionable elements
@@ -325,10 +365,10 @@ def walk_actionable(
         duplicate = inherited and parent_emitted  # the parent already stands for this label
         nameless_group = role == "AXGroup" and not own_label  # a Chromium layout box, not a control
         if label and clickable(frame) and not duplicate and not nameless_group:
-            pressable = "AXPress" in actions(node)
+            pressable = AX_PRESS in actions(node)
             if pressable or role in AX_ACTIONABLE_ROLES:
                 x, y, w, h = frame
-                found.append(AxNode(role=role, label=label, x=x, y=y, w=w, h=h, pressable=pressable))
+                found.append(AxNode(role=role, label=label, x=x, y=y, w=w, h=h, pressable=pressable, ref=node))
                 emitted = True
         child_label = own_label if role in AX_LABEL_PARENT_ROLES else ""
         queue.extend((kid, child_label, emitted) for kid in kids)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from pathlib import Path
 
 from PIL import ImageDraw, ImageFont
@@ -72,7 +71,7 @@ def render_payload(goal: str, screen: Screen, items: list[Item], history: list[s
             f"click_pt=({cx:.0f},{cy:.0f}) {screen.region(it):13} {it.text!r}"
         )
     if screen.field:
-        parts += ["", "FOCUSED FIELD", json.dumps(asdict(screen.field), indent=2)]
+        parts += ["", "FOCUSED FIELD", json.dumps(screen.field.record(), indent=2)]
     return "\n".join(parts) + "\n"
 
 

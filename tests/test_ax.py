@@ -2,7 +2,7 @@ from dataclasses import replace
 
 from typesafe_computer_use import macos, perception
 from typesafe_computer_use.macos import AxAttrs, walk_actionable
-from typesafe_computer_use.models import AxNode
+from typesafe_computer_use.models import AxNode, Item
 
 DISPLAY = (1728.0, 1117.0)
 
@@ -143,3 +143,41 @@ def test_ax_items_are_skipped_without_a_pid_and_when_the_walk_raises(screen, mon
     monkeypatch.setattr(macos, "actionable_elements", boom)
     assert perception.ax_items(screen, 255) == []
     assert perception.ax_items(replace(screen, pid=123), 255) == []
+
+
+def test_the_walker_keeps_a_handle_to_every_element_it_reports():
+    button = node("AXButton", "Share")
+    found, _ = walk(app(button))
+    assert [n.ref for n in found] == [button]
+    assert found[0] == AxNode(role="AXButton", label="Share", x=10.0, y=10.0, w=100.0, h=20.0, pressable=False)
+
+
+def test_ax_refs_follow_items_through_the_merge_and_the_renumbering(screen, monkeypatch):
+    left, right = object(), object()
+    nodes = [
+        AxNode(role="AXButton", label="Right", x=400.0, y=50.0, w=60.0, h=20.0, pressable=True, ref=right),
+        AxNode(role="AXLink", label="Left", x=50.0, y=52.0, w=60.0, h=20.0, pressable=True, ref=left),
+    ]
+    monkeypatch.setattr(macos, "actionable_elements", lambda pid, w, h: (nodes, False))
+    monkeypatch.setattr(
+        perception,
+        "ocr",
+        lambda screen, budget, goal: [
+            Item(0, "Left", 0.9, 100.0, 104.0, 220.0, 140.0),  # names the control, so the two merge
+            Item(1, "Unrelated text", 0.9, 100.0, 400.0, 300.0, 430.0),
+        ],
+    )
+    live = replace(screen, pid=123)
+    items = perception.perceive(live, 255, "goal")
+    assert [(it.index, it.text, it.source) for it in items] == [
+        (0, "Left", "ax+ocr"),
+        (1, "Right", "ax"),
+        (2, "Unrelated text", "ocr"),
+    ]
+    assert live.ax_refs == {0: left, 1: right}
+
+
+def test_ax_refs_are_empty_without_an_accessibility_tree(screen, monkeypatch):
+    monkeypatch.setattr(perception, "ocr", lambda screen, budget, goal: [Item(0, "Only text", 0.9, 10.0, 10.0, 90.0, 40.0)])
+    items = perception.perceive(screen, 255, "goal")
+    assert [it.source for it in items] == ["ocr"] and screen.ax_refs == {}

@@ -183,7 +183,7 @@ def answers(decision: Decision, screen: Screen, items: list[Item], timing: dict[
         "confidence": decision.confidence,
         "timing": timing,
         "items": [asdict(it) for it in items],
-        "field": asdict(screen.field) if screen.field else None,
+        "field": screen.field.record() if screen.field else None,
         "app": screen.app,
         "url": screen.url,
     }
