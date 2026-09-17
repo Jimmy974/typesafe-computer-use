@@ -10,22 +10,34 @@ from PIL import Image
 from . import macos
 from .config import MIN_OCR_CONFIDENCE
 from .models import Box, Item, Screen
+from .timing import phase
 
 Line = tuple[str, float, Box]
 ECHO_CHARS = 24
 
 
-def capture(image_path: Path | None = None, app: str | None = None, url: str | None = None, browser: str = "") -> Screen:
-    """Capture the main display, or load a saved capture for replay (then app/url are taken as given)."""
+def capture(
+    image_path: Path | None = None,
+    app: str | None = None,
+    url: str | None = None,
+    browser: str = "",
+    timing: dict[str, float] | None = None,
+) -> Screen:
+    """Capture the main display, or load a saved capture for replay (then app/url are taken as given).
+
+    Each query below is a round trip to the window server, AX, or AppleScript. Pass `timing` to
+    record the seconds each one costs under "screenshot", "app", "field", and "url".
+    """
     replay = image_path is not None and app is not None
-    image = Image.open(image_path).convert("RGB") if image_path else macos.screenshot()
-    return Screen(
-        image=image,
-        scale=macos.display_scale(image),
-        app=app or macos.frontmost_app(),
-        field=None if replay else macos.focused_field(),
-        url=url if url is not None else (None if replay else macos.browser_url(browser)),
-    )
+    with phase(timing, "screenshot"):
+        image = Image.open(image_path).convert("RGB") if image_path else macos.screenshot()
+    with phase(timing, "app"):
+        frontmost = app or macos.frontmost_app()
+    with phase(timing, "field"):
+        field = None if replay else macos.focused_field()
+    with phase(timing, "url"):
+        page_url = url if url is not None else (None if replay else macos.browser_url(browser))
+    return Screen(image=image, scale=macos.display_scale(image), app=frontmost, field=field, url=page_url)
 
 
 def goal_echoes(goal: str) -> set[str]:

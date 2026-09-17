@@ -148,11 +148,19 @@ Every run writes `runs/<timestamp>/` so a stall can be replayed and fixed offlin
 
 | file | contents |
 |---|---|
-| `run.log`, `run.json` | everything printed; goal, outcome, seconds, every action, config |
+| `run.log`, `run.json` | everything printed; goal, outcome, seconds, every action, config, and `timing` (mean and max seconds per phase, with `steps_timed`) |
 | `step-NN-raw.png` | the capture |
 | `step-NN.png` | OCR blocks numbered in blue, the chosen one red, the focused field green |
 | `step-NN-payload.txt` | the exact `state` and criteria sent to TypeSafe, then every block with box, click point, confidence |
-| `step-NN-answers.json` | every probability the classifier returned |
+| `step-NN-answers.json` | every probability the classifier returned, plus `timing` for that step |
+
+Each step also logs what it cost, so a slow phase is obvious:
+
+```
+  timing: capture 0.31s  screenshot 0.28s  app 0.01s  field 0.01s  url 0.01s  ocr 0.82s  decide 0.21s  act 0.05s  total 1.45s
+```
+
+`capture` covers the four round trips under it; `act` is left out when the step did not act.
 
 Replay a saved capture as if it were live, without touching the screen:
 
@@ -172,6 +180,7 @@ typesafe_computer_use/
   actions.py      one handler per action, each returning a history line
   runner.py       the step loop, run folder, stop rules
   report.py       logging, annotated screenshots, payload dump
+  timing.py       phase stopwatches, the timing line, run summary
   cli.py          `clicker` and `clicker-inspect`
 tests/            pure logic: dates, merging, reading order, echo filter, config, decisions
 ```
