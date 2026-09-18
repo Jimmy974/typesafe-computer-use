@@ -88,6 +88,74 @@ def test_a_fallback_click_is_not_treated_as_a_no_op():
     assert not actions.is_noop("clicked 'Register Now' (accessibility press did not take)")
 
 
+def context(writer=None) -> actions.Context:
+    return actions.Context(
+        goal="find the next upcoming bruno mars concert",
+        browser="Google Chrome",
+        email=None,
+        typesafe=None,
+        writer=writer,
+        history=[],
+    )
+
+
+def browsing(site: str) -> SimpleNamespace:
+    return SimpleNamespace(chosen="use_browser", site=SimpleNamespace(choice=site))
+
+
+@pytest.fixture
+def browser(monkeypatch):
+    """The trips use_browser makes, recorded, with both of them reporting success."""
+    log: list[tuple] = []
+    monkeypatch.setattr(macos, "activate", lambda app: log.append(("activate", app)) or True)
+    monkeypatch.setattr(macos, "open_url", lambda app, url: log.append(("open", app, url)) or True)
+    return log
+
+
+def test_use_browser_with_no_site_only_brings_the_browser_forward(screen, browser):
+    assert actions.perform(browsing("none"), screen, [], context()) == "activated Google Chrome"
+    assert browser == [("activate", "Google Chrome")]
+
+
+def test_use_browser_opens_a_catalog_site_by_its_url(screen, browser, monkeypatch):
+    monkeypatch.setattr(actions, "compose_url", lambda *a: pytest.fail("the catalog already names this site"))
+    assert actions.perform(browsing("github"), screen, [], context()) == "opened https://github.com/"
+    assert browser == [("open", "Google Chrome", "https://github.com/")]
+
+
+def test_use_browser_asks_the_writer_for_a_site_outside_the_catalog(screen, browser, monkeypatch):
+    writer = object()
+    asked = []
+    monkeypatch.setattr(
+        actions,
+        "compose_url",
+        lambda w, goal, history: asked.append((w, goal)) or "https://www.songkick.com/",
+    )
+    assert actions.perform(browsing("other"), screen, [], context(writer)) == "opened https://www.songkick.com/"
+    assert asked == [(writer, "find the next upcoming bruno mars concert")]
+    assert browser == [("open", "Google Chrome", "https://www.songkick.com/")]
+
+
+def test_use_browser_without_a_writer_refuses_a_site_outside_the_catalog(screen, browser):
+    refusal = actions.perform(browsing("other"), screen, [], context())
+    assert refusal == "use_browser refused: the site is outside the catalog and no writer is available to propose a URL"
+    assert actions.is_noop(refusal) and browser == []
+
+
+def test_use_browser_refuses_when_the_writer_proposes_nothing(screen, browser, monkeypatch):
+    monkeypatch.setattr(actions, "compose_url", lambda writer, goal, history: "")
+    refusal = actions.perform(browsing("other"), screen, [], context(object()))
+    assert refusal == "use_browser refused: the writer proposed no usable URL for this goal"
+    assert actions.is_noop(refusal) and browser == []
+
+
+def test_a_browser_that_does_not_come_to_the_front_is_a_no_op(screen, monkeypatch):
+    monkeypatch.setattr(macos, "activate", lambda app: False)
+    failure = actions.perform(browsing("none"), screen, [], context())
+    assert failure == "use_browser failed: Google Chrome did not come to the front"
+    assert actions.is_noop(failure)
+
+
 def test_typing_sets_the_value_when_the_field_reads_it_back(calls, monkeypatch):
     written = []
     monkeypatch.setattr(macos, "ax_set_value", lambda ref, text: written.append(text) or True)

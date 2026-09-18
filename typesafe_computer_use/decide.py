@@ -22,13 +22,11 @@ PRESS_OFFSCREEN = (
 def fixed_actions(browser: str, email: str | None) -> dict[str, str]:
     """Deterministic actions offered alongside click_item. Keep them mutually exclusive."""
     actions = {
-        "switch_to_browser": (
-            f"Bring {browser} to the front to continue with whatever page is already open there. "
-            "Not for reaching a specific website: open_site does that on its own, even from another app."
-        ),
-        "open_site": (
-            "Navigate the browser to a website. This is the only way to go to a site: never click the "
-            "address bar, a URL, or a search box to get there."
+        "use_browser": (
+            f"Work in {browser}: bring it to the front, and open a website there if one is needed. The "
+            "site question says which website, or says that the page already open there is the one to "
+            "continue with. This is the only way to reach a website: never click the address bar, a URL, "
+            "or a search box to get there. Works from any app, including this one."
         ),
         "type_text": (
             "Type free text into the focused text field. A writing model composes the text from the "
@@ -80,7 +78,12 @@ def offscreen_records(nodes: list[AxNode]) -> list[dict]:
 
 
 def site_criteria() -> dict[str, str]:
-    return {**SITES, "none": "No website is needed."}
+    """Which website use_browser opens. The catalog, plus one key for anything else and one for nothing."""
+    return {
+        **SITES,
+        "other": "A website is needed to progress the goal, but it is not one of the sites named in this list.",
+        "none": "No website needs to be opened: the page already open in the browser is the one to continue with.",
+    }
 
 
 def base_state(goal: str, screen: Screen, items: list[Item], history: list[str]) -> dict:
@@ -131,6 +134,10 @@ class Decision:
 
     @property
     def confidence(self) -> float:
+        # Only the answers that name a target lower the confidence: a click or a press lands
+        # somewhere, and the wrong somewhere is not undone. use_browser reads the site answer too,
+        # but every outcome of it is a page the next step can leave, so a split there must not
+        # stop the run.
         if self.clicking:
             return min(self.kind.confidence, self.item.confidence)
         if self.pressing_offscreen:
@@ -154,7 +161,14 @@ def decide(
             ),
             criteria=kind_criteria(browser, email, bool(screen.offscreen)),
         ),
-        "site": Choice(instructions="If a website must be opened to progress the goal, which one?", criteria=site_criteria()),
+        "site": Choice(
+            instructions=(
+                "If the browser is used this step, which website should it show? Name a site from the "
+                "list when the goal calls for that one, 'other' when the goal calls for a site the list "
+                "does not name, and 'none' to stay on the page that is already open in the browser."
+            ),
+            criteria=site_criteria(),
+        ),
     }
     if items:
         questions["item"] = Choice(

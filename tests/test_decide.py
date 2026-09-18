@@ -1,7 +1,8 @@
 from dataclasses import replace
 from types import SimpleNamespace
 
-from typesafe_computer_use.decide import Decision, base_state, item_criteria, kind_criteria, offscreen_criteria
+from typesafe_computer_use.config import SITES
+from typesafe_computer_use.decide import Decision, base_state, item_criteria, kind_criteria, offscreen_criteria, site_criteria
 from typesafe_computer_use.models import AxNode
 
 
@@ -15,8 +16,13 @@ def test_decision_click_uses_item_and_min_confidence():
 
 
 def test_decision_fixed_action_ignores_item():
-    d = Decision(kind=answer("open_site", 0.8), item=answer("3", 0.1), site=answer("github", 0.9))
-    assert not d.clicking and d.chosen == "open_site" and d.confidence == 0.8
+    d = Decision(kind=answer("use_browser", 0.8), item=answer("3", 0.1), site=answer("github", 0.9))
+    assert not d.clicking and d.chosen == "use_browser" and d.confidence == 0.8
+
+
+def test_decision_use_browser_ignores_a_split_site_answer():
+    d = Decision(kind=answer("use_browser", 0.88), item=None, site=answer("other", 0.45))
+    assert d.chosen == "use_browser" and d.confidence == 0.88
 
 
 def test_decision_stops_on_done_or_none():
@@ -55,6 +61,20 @@ def test_offscreen_criteria_and_state_name_the_role_and_say_it_is_not_visible(sc
         {"k": 1, "role": "cell", "label": "Note 900"},
     ]
     assert "offscreen_controls" not in base_state("buy the thing", screen, [make_item(0, "Buy")], [])
+
+
+def test_kind_criteria_offers_one_browser_action():
+    crit = kind_criteria("Google Chrome", None)
+    assert "use_browser" in crit
+    assert "switch_to_browser" not in crit and "open_site" not in crit
+    assert "Google Chrome" in crit["use_browser"] and "address bar" in crit["use_browser"]
+
+
+def test_site_criteria_covers_the_catalog_a_site_outside_it_and_no_site():
+    crit = site_criteria()
+    assert crit["github"] == SITES["github"]
+    assert "not one of the sites named in this list" in crit["other"]
+    assert "already open" in crit["none"]
 
 
 def test_kind_criteria_offers_email_only_when_set():

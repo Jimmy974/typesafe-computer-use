@@ -94,19 +94,28 @@ def fill_field(field: Field, text: str) -> str:
     return "via keystrokes"
 
 
-def _switch_to_browser(decision, screen, items, ctx: Context) -> str:
-    if macos.activate(ctx.browser):
-        return f"activated {ctx.browser}"
-    return f"switch_to_browser failed: {ctx.browser} did not come to the front"
+def _use_browser(decision: Decision, screen, items, ctx: Context) -> str:
+    """Go to the browser, and open the website the site answer named.
 
-
-def _open_site(decision: Decision, screen, items, ctx: Context) -> str:
-    url = SITES.get(decision.site.choice) or (compose_url(ctx.writer, ctx.goal, ctx.history) if ctx.writer else "")
+    `none` is the page already open there, so bringing the browser forward is the whole action. A
+    catalog key is its URL, and `other` is a site outside the catalog, which only the writer can
+    name. Opening a URL activates the browser too, so the three cases differ only in the page.
+    """
+    site = decision.site.choice
+    if site == "none":
+        if macos.activate(ctx.browser):
+            return f"activated {ctx.browser}"
+        return f"use_browser failed: {ctx.browser} did not come to the front"
+    url = SITES.get(site)
+    if url is None:
+        if ctx.writer is None:
+            return "use_browser refused: the site is outside the catalog and no writer is available to propose a URL"
+        url = compose_url(ctx.writer, ctx.goal, ctx.history)
     if not url:
-        return "open_site refused: no known site matches and no writer available to propose a URL"
+        return "use_browser refused: the writer proposed no usable URL for this goal"
     if macos.open_url(ctx.browser, url):
         return f"opened {url}"
-    return f"open_site failed: opened {url} but {ctx.browser} did not come to the front"
+    return f"use_browser failed: opened {url} but {ctx.browser} did not come to the front"
 
 
 def _type_email(decision, screen: Screen, items, ctx: Context) -> str:
@@ -150,8 +159,7 @@ def _scroll(lines: int, description: str):
 
 
 _HANDLERS = {
-    "switch_to_browser": _switch_to_browser,
-    "open_site": _open_site,
+    "use_browser": _use_browser,
     "type_email": _type_email,
     "type_text": _type_text,
     "press_enter": _key("return", "pressed Return"),

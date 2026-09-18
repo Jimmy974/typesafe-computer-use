@@ -103,9 +103,9 @@ dates.py      ─► "dated 2026-10-13 (in 27 days)" on any block containing a d
                      ▼
         one TypeSafe request, three Choices, four with off-screen controls
         ┌────────────────────────────────────────────────────────────┐
-        │ kind      : click_item | open_site | type_text | scroll…   │
+        │ kind      : click_item | use_browser | type_text | scroll… │
         │ item      : which item (used only for click_item)          │
-        │ site      : which catalog site (used only for open_site)   │
+        │ site      : which website (used only for use_browser)      │
         │ offscreen : which hidden control (only for press_offscreen)│
         └────────────────────────────────────────────────────────────┘
                      │
@@ -195,8 +195,7 @@ on the app, and the node and time caps bind first on a big tree: Notes and Chrom
 |---|---|
 | `click_item` | press the element through the accessibility tree when the item came from it, so the press lands on the control rather than on whatever covers it; a mouse click at the center of the box otherwise, and as the fallback when the press is refused |
 | `press_offscreen` | `AXPress` a labelled control the app exposes but does not show, chosen from the off-screen list; offered only when that list is not empty, and a refusal counts as a no-op since there is no pixel to fall back on |
-| `open_site` | AppleScript `open location` for a `SITES` catalog entry, or a URL the writer proposes |
-| `switch_to_browser` | bring the browser forward to continue with a page already open there |
+| `use_browser` | go to the browser, showing the website the `site` answer names: `none` brings it forward on the page already open there, a `SITES` catalog key opens that URL through AppleScript `open location`, and `other` opens a URL the writer proposes |
 | `type_text` | the writer composes the string; it is set on the focused element through the accessibility tree, with keystrokes as the fallback when the value does not read back, and a TypeSafe Noul then checks the field's value |
 | `type_email` | fills in `$CLICKER_EMAIL` the same way; refused unless a text field is focused |
 | `press_enter`, `press_escape` | keyboard |
@@ -213,7 +212,7 @@ small packet and a structured reply:
   placeholder, and the OCR lines near the field. It returns `{fill, text}`. Credential
   fields come back `fill: false` and nothing is typed. After typing, a Noul scores
   whether the field now holds a sensible value. Under 0.5 the field is cleared.
-- **`open_site`** with no catalog match receives the goal and returns `{ok, url}`.
+- **`use_browser`** with `site: other` receives the goal and returns `{ok, url}`.
   Code rejects anything that is not a clean https URL with a hostname.
 
 Passwords are never typed. Rely on the browser's password manager or an SSO button
