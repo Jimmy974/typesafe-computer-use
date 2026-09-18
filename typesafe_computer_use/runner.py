@@ -139,7 +139,7 @@ def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
         screen = capture(cfg.image, cfg.app, cfg.url, ctx.browser, timing)
     items = perceive(screen, MAX_OPTIONS, cfg.goal, timing, None if cfg.replay else state.ocr_cache)
     state.view = (screen, items)
-    prefix = cfg.out / f"step-{step:02d}"
+    prefix = cfg.out / f"step-{step:03d}"  # three digits, so a run of 100 steps still lists in order
     screen.image.save(prefix.with_name(prefix.name + "-raw.png"))
     prefix.with_name(prefix.name + "-payload.txt").write_text(
         render_payload(cfg.goal, screen, items, state.history, ctx.browser, ctx.email)

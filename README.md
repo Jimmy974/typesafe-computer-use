@@ -74,7 +74,7 @@ synthetic clicks are silently dropped, and `--act` refuses to start.
 
 ```
 uv run clicker "open the Playground"                 # dry run: one step, prints what it would do
-uv run clicker "open the Playground" --act           # drives the machine, up to 12 steps
+uv run clicker "open the Playground" --act           # drives the machine, up to 100 steps
 uv run clicker "log in" --act --steps 20 --delay 3   # longer and slower
 uv run clicker-inspect "any goal"                    # 3-2-1, capture, open the annotated screen + payload
 ```
@@ -238,10 +238,10 @@ Every run writes `runs/<timestamp>/` so a stall can be replayed and fixed offlin
 |---|---|
 | `run.log`, `run.json` | everything printed; goal, outcome (`done`, `nothing helps`, `low confidence`, `stalled`, `step limit`, `dry run`, `aborted`, `crashed`), `answer` and `goal_achieved`, seconds, every action, config, and `timing` (mean and max seconds per phase, with `steps_timed`) |
 | `answer-raw.png` | the capture the answer was read from, when an action made the last step's capture stale |
-| `step-NN-raw.png` | the capture |
-| `step-NN.png` | items numbered in blue, accessibility ones orange, the chosen one red, the focused field green |
-| `step-NN-payload.txt` | the exact `state` and criteria sent to TypeSafe, then every item with source, role, box, click point, confidence, then the off-screen controls |
-| `step-NN-answers.json` | every probability the classifier returned, the off-screen controls it was offered, plus `timing` for that step |
+| `step-NNN-raw.png` | the capture |
+| `step-NNN.png` | items numbered in blue, accessibility ones orange, the chosen one red, the focused field green |
+| `step-NNN-payload.txt` | the exact `state` and criteria sent to TypeSafe, then every item with source, role, box, click point, confidence, then the off-screen controls |
+| `step-NNN-answers.json` | every probability the classifier returned, the off-screen controls it was offered, plus `timing` for that step |
 
 Each step also logs what it cost, so a slow phase is obvious:
 
@@ -254,7 +254,7 @@ Each step also logs what it cost, so a slow phase is obvious:
 Replay a saved capture as if it were live, without touching the screen:
 
 ```
-uv run clicker "same goal" --image runs/<ts>/step-03-raw.png --app "Google Chrome" --url "https://example.com/"
+uv run clicker "same goal" --image runs/<ts>/step-003-raw.png --app "Google Chrome" --url "https://example.com/"
 ```
 
 ## Layout
