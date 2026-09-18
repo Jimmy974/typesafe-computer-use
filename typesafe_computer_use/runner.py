@@ -7,6 +7,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+import anthropic
 from typesafe_sdk import TypeSafeClient
 
 from . import macos
@@ -17,8 +18,19 @@ from .models import Abort, Item, Screen
 from .perception import OcrCache, capture, perceive
 from .report import Log, annotate, ax_count, render_payload, top
 from .timing import format_timing, phase, summarize
+from .writer import Answer, compose_answer
 
 MAX_CONSECUTIVE_NOOPS = 2
+
+# The outcomes that end with an answer, each in words the writer can pass on. A dry run took no
+# action and an abort is the user's own stop, so neither has anything to report.
+STOPPED = {
+    "done": "the classifier judged the goal already achieved on this screen",
+    "nothing helps": "the classifier found nothing on this screen that helps with the goal",
+    "low confidence": "the classifier was not confident enough in any next action",
+    "stalled": "the last actions changed nothing",
+    "step limit": "the run used every step it was allowed",
+}
 
 
 @dataclass
@@ -44,8 +56,10 @@ class RunState:
     timings: list[dict[str, float]] = field(default_factory=list)
     consecutive_noops: int = 0
     last_url: str | None = None
-    outcome: str = "completed"
+    outcome: str = "crashed"  # every way out of the loop names its own; only an exception leaves this
     ocr_cache: OcrCache = field(default_factory=OcrCache)  # carries one step's OCR into the next
+    view: tuple[Screen, list[Item]] | None = None  # the latest capture, until an action makes it stale
+    answer: Answer | None = None
 
 
 def run(cfg: RunConfig, ctx_factory) -> RunState:
@@ -67,6 +81,7 @@ def run(cfg: RunConfig, ctx_factory) -> RunState:
             else:
                 log(f"\nstopped after {cfg.steps} steps")
                 state.outcome = "step limit"
+            conclude(cfg, ctx, state, log)
     except (KeyboardInterrupt, Abort) as e:
         state.outcome = f"aborted ({e or 'Ctrl-C'})"
         log(f"\n{state.outcome} after {len(state.history)} actions")
@@ -76,6 +91,8 @@ def run(cfg: RunConfig, ctx_factory) -> RunState:
             "act": cfg.act,
             "steps_taken": len(state.history),
             "outcome": state.outcome,
+            "answer": state.answer.text if state.answer else None,
+            "goal_achieved": state.answer.achieved if state.answer else None,
             "seconds": round(time.time() - started, 1),
             "timing": summarize(state.timings),
             "history": state.history,
@@ -86,6 +103,34 @@ def run(cfg: RunConfig, ctx_factory) -> RunState:
     return state
 
 
+def conclude(cfg: RunConfig, ctx: Context, state: RunState, log: Log) -> None:
+    """Hand the screen the run ended on to the writer, for the answer the classifier cannot put into words.
+
+    The last step's capture serves when nothing acted after it. An action makes it stale, so the
+    screen is captured again, and saved so the answer can be checked against what it was read from.
+    """
+    stopped = STOPPED.get(state.outcome)
+    if stopped is None:
+        return
+    if ctx.writer is None:
+        log("\nno answer: the writer is disabled (set ANTHROPIC_API_KEY)")
+        return
+    started = time.perf_counter()
+    if state.view is None:
+        macos.check_abort()
+        screen = capture(cfg.image, cfg.app, cfg.url, ctx.browser)
+        screen.image.save(cfg.out / "answer-raw.png")
+        state.view = (screen, perceive(screen, MAX_OPTIONS, cfg.goal))
+    screen, items = state.view
+    try:
+        state.answer = compose_answer(ctx.writer, cfg.goal, screen, items, state.history, stopped)
+    except anthropic.APIError as e:
+        log(f"\nno answer: the writer failed ({e})")
+        return
+    verdict = "goal achieved" if state.answer.achieved else "goal not achieved"
+    log(f"\nanswer ({verdict}, {time.perf_counter() - started:.1f}s):\n  {state.answer.text}")
+
+
 def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log) -> bool:
     macos.check_abort()
     timing: dict[str, float] = {}
@@ -93,6 +138,7 @@ def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
     with phase(timing, "capture"):
         screen = capture(cfg.image, cfg.app, cfg.url, ctx.browser, timing)
     items = perceive(screen, MAX_OPTIONS, cfg.goal, timing, None if cfg.replay else state.ocr_cache)
+    state.view = (screen, items)
     prefix = cfg.out / f"step-{step:02d}"
     screen.image.save(prefix.with_name(prefix.name + "-raw.png"))
     prefix.with_name(prefix.name + "-payload.txt").write_text(
@@ -130,10 +176,9 @@ def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
     log(f"  files: {prefix.name}-raw.png, {prefix.name}.png, {prefix.name}-payload.txt, {prefix.name}-answers.json")
     log(format_timing(timing))
 
-    if not keep_going:
-        return False
-    macos.sleep_watching(cfg.delay)
-    return True
+    if state.view is None:  # an action ran: let the screen settle before the next step, or the answer, reads it
+        macos.sleep_watching(cfg.delay)
+    return keep_going
 
 
 def resolve(
@@ -149,16 +194,20 @@ def resolve(
     """Apply the stop rules, then the action. True to keep looping."""
     if decision.stops:
         log(f"  model says {decision.kind.choice!r}; stopping")
+        state.outcome = "done" if decision.kind.choice == "done" else "nothing helps"
         return False
     if decision.confidence < cfg.min_confidence:
         log(f"  confidence {decision.confidence:.2f} below {cfg.min_confidence}; stopping")
+        state.outcome = "low confidence"
         return False
     if not cfg.act or cfg.replay:
         log(f"  would do: {decision.chosen}. dry run (pass --act without --image to drive the machine)")
+        state.outcome = "dry run"
         return False
 
     with phase(timing, "act"):
         what = perform(decision, screen, items, ctx)
+    state.view = None
     repeated = bool(state.history) and state.history[-1] == what and screen.url == state.last_url
     state.last_url = screen.url
     state.history.append(what)

@@ -1,13 +1,17 @@
-"""The writer model: the only place free text is generated, and only when the classifier asks for it."""
+"""The writer model: the only place free text is generated, when the classifier asks for it and once when the run ends."""
 
 from __future__ import annotations
 
+import base64
+import io
 import json
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 import anthropic
+from PIL import Image
 
-from .config import writer_model
+from .config import answer_model, writer_model
 from .dates import now_context
 from .models import Item, Screen
 from .perception import near_field
@@ -21,12 +25,26 @@ def make_writer() -> anthropic.Anthropic | None:
     return None
 
 
-def _structured(writer: anthropic.Anthropic, system: str, packet: dict, properties: dict, max_tokens: int) -> dict:
+ANSWER_IMAGE_EDGE = 1568  # the longest edge a vision model reads without shrinking the image itself
+
+
+def _structured(
+    writer: anthropic.Anthropic,
+    system: str,
+    packet: dict,
+    properties: dict,
+    max_tokens: int,
+    model: str | None = None,
+    image: Image.Image | None = None,
+) -> dict:
+    content: list[dict] = [{"type": "text", "text": json.dumps(packet)}]
+    if image is not None:
+        content.insert(0, _image_block(image))
     response = writer.messages.create(
-        model=writer_model(),
+        model=model or writer_model(),
         max_tokens=max_tokens,
         system=system,
-        messages=[{"role": "user", "content": json.dumps(packet)}],
+        messages=[{"role": "user", "content": content}],
         output_config={
             "format": {
                 "type": "json_schema",
@@ -40,6 +58,16 @@ def _structured(writer: anthropic.Anthropic, system: str, packet: dict, properti
         },
     )
     return json.loads("".join(b.text for b in response.content if b.type == "text"))
+
+
+def _image_block(image: Image.Image) -> dict:
+    """The capture as a PNG the model can read. PNG because screen text does not survive JPEG well."""
+    shrunk = image.convert("RGB")
+    shrunk.thumbnail((ANSWER_IMAGE_EDGE, ANSWER_IMAGE_EDGE))
+    buffer = io.BytesIO()
+    shrunk.save(buffer, format="PNG")
+    data = base64.b64encode(buffer.getvalue()).decode()
+    return {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}}
 
 
 def compose_text(writer: anthropic.Anthropic, goal: str, screen: Screen, items: list[Item], history: list[str]) -> str:
@@ -87,3 +115,48 @@ def compose_url(writer: anthropic.Anthropic, goal: str, history: list[str]) -> s
     )
     url = data["url"].strip() if data["ok"] else ""
     return url if valid_url(url) else ""
+
+
+@dataclass(frozen=True)
+class Answer:
+    text: str
+    achieved: bool  # whether the screen itself shows the goal reached, in the writer's judgement
+
+
+def compose_answer(
+    writer: anthropic.Anthropic, goal: str, screen: Screen, items: list[Item], history: list[str], stopped: str
+) -> Answer:
+    """What to tell the user now that the run is over: the result when the screen holds it, where things stand when not.
+
+    The classifier can stop on the right page but cannot say what the page says. The writer reads the
+    capture itself as well as its text, since OCR misreads a letter here and there and drops layout.
+    """
+    packet = {
+        "goal": goal,
+        "now": now_context(),
+        "why_the_run_stopped": stopped,
+        "actions_taken": history,
+        "frontmost_app": screen.app,
+        "browser_active_tab_url": screen.url,
+        "screen_text_in_reading_order": [it.text for it in items],
+    }
+    data = _structured(
+        writer,
+        system=(
+            "An agent drove a user's computer toward the user's goal and has now stopped. You receive "
+            "the goal, the actions it took, why it stopped, a capture of the screen as it is now, and "
+            "the text read from that screen. Tell the user the result. When the goal asks for "
+            "information, lead with that information, taken only from the screen: never from memory, "
+            "and never a guess. When the goal asks for something to be done, say whether the screen "
+            "shows it done. When the screen does not hold the result, say so plainly, then say what is "
+            "on screen and the one next step that would get there. Trust the capture over the text "
+            "where the two disagree. Plain text, no markdown, four sentences at most. Set achieved to "
+            "true only when the screen itself shows the goal reached."
+        ),
+        packet=packet,
+        properties={"achieved": {"type": "boolean"}, "answer": {"type": "string"}},
+        max_tokens=1024,
+        model=answer_model(),
+        image=screen.image,
+    )
+    return Answer(text=data["answer"].strip(), achieved=data["achieved"])

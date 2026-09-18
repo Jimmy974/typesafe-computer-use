@@ -12,6 +12,7 @@ DEFAULT_MIN_CONFIDENCE = 0.4
 DEFAULT_STEPS = 12
 DEFAULT_DELAY = 2.0
 DEFAULT_WRITER_MODEL = "claude-haiku-4-5"
+DEFAULT_ANSWER_MODEL = "claude-sonnet-5"  # runs once per run, on a screenshot: worth a stronger reader
 DEFAULT_BROWSER = "Google Chrome"
 
 # Sites the classifier can pick by name. Anything else goes through the writer.
@@ -45,6 +46,10 @@ def browser() -> str:
 
 def writer_model() -> str:
     return os.environ.get("CLICKER_WRITER_MODEL", DEFAULT_WRITER_MODEL)
+
+
+def answer_model() -> str:
+    return os.environ.get("CLICKER_ANSWER_MODEL", DEFAULT_ANSWER_MODEL)
 
 
 def email() -> str | None:

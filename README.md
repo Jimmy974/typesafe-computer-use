@@ -60,10 +60,11 @@ cp .env.example .env     # fill in the keys
 | variable | required | purpose |
 |---|---|---|
 | `TYPESAFE_API_KEY` | yes | every decision |
-| `ANTHROPIC_API_KEY` | no | `type_text` and writer-proposed URLs |
+| `ANTHROPIC_API_KEY` | no | `type_text`, writer-proposed URLs, and the final answer |
 | `CLICKER_EMAIL` | no | enables the `type_email` action |
 | `CLICKER_BROWSER` | no | defaults to `Google Chrome` |
 | `CLICKER_WRITER_MODEL` | no | defaults to `claude-haiku-4-5` |
+| `CLICKER_ANSWER_MODEL` | no | reads the last screen for the final answer; defaults to `claude-sonnet-5` |
 
 Grant your terminal **Screen Recording** and **Accessibility** in System Settings >
 Privacy & Security. Without the first, captures are wallpaper. Without the second,
@@ -84,6 +85,11 @@ Clear the terminal first. It is on screen, so its text is OCR input.
 top-left corner of the screen from any app. The loop also stops itself on `done` or
 `none`, on confidence under `--min-confidence` (0.4), after two consecutive no-ops, or
 at `--steps`.
+
+**The answer.** When the loop stops itself, the writer reads the screen it stopped on
+and prints the result: the information the goal asked for, or where things stand and
+the next step when the screen does not hold it. A dry run that would have acted, and
+an aborted run, print no answer.
 
 ## How a step works
 
@@ -205,7 +211,7 @@ on the app, and the node and time caps bind first on a big tree: Notes and Chrom
 
 ### Where free text comes from
 
-The classifier never generates text. The writer model runs in two places, each with a
+The classifier never generates text. The writer model runs in three places, each with a
 small packet and a structured reply:
 
 - **`type_text`** receives the goal, recent actions, the focused field's label and
@@ -214,6 +220,12 @@ small packet and a structured reply:
   whether the field now holds a sensible value. Under 0.5 the field is cleared.
 - **`use_browser`** with `site: other` receives the goal and returns `{ok, url}`.
   Code rejects anything that is not a clean https URL with a hostname.
+- **The answer**, once, when the loop stops itself. It receives the goal, every action
+  taken, why the run stopped, the text of the last screen, and the capture itself,
+  because OCR misreads a letter here and there and drops layout. It returns
+  `{achieved, answer}`, and is told to take the answer from the screen alone. When an
+  action ran after the last capture, the screen is captured again first. This one
+  call uses `CLICKER_ANSWER_MODEL`, a stronger reader than the per-step writer.
 
 Passwords are never typed. Rely on the browser's password manager or an SSO button
 the OCR can read.
@@ -224,7 +236,8 @@ Every run writes `runs/<timestamp>/` so a stall can be replayed and fixed offlin
 
 | file | contents |
 |---|---|
-| `run.log`, `run.json` | everything printed; goal, outcome, seconds, every action, config, and `timing` (mean and max seconds per phase, with `steps_timed`) |
+| `run.log`, `run.json` | everything printed; goal, outcome (`done`, `nothing helps`, `low confidence`, `stalled`, `step limit`, `dry run`, `aborted`, `crashed`), `answer` and `goal_achieved`, seconds, every action, config, and `timing` (mean and max seconds per phase, with `steps_timed`) |
+| `answer-raw.png` | the capture the answer was read from, when an action made the last step's capture stale |
 | `step-NN-raw.png` | the capture |
 | `step-NN.png` | items numbered in blue, accessibility ones orange, the chosen one red, the focused field green |
 | `step-NN-payload.txt` | the exact `state` and criteria sent to TypeSafe, then every item with source, role, box, click point, confidence, then the off-screen controls |
@@ -255,9 +268,9 @@ typesafe_computer_use/
                   source, and the merge of the two
   dates.py        date parsing and "in N days" hints
   decide.py       state, criteria, the three-Choice request, the Noul check
-  writer.py       the writer model, structured replies, URL validation
+  writer.py       the writer model, structured replies, URL validation, the final answer
   actions.py      one handler per action, each returning a history line
-  runner.py       the step loop, run folder, stop rules
+  runner.py       the step loop, run folder, stop rules, the hand-off for the answer
   report.py       logging, annotated screenshots, payload dump
   timing.py       phase stopwatches, the timing line, run summary
   cli.py          `clicker` and `clicker-inspect`
