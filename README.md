@@ -260,7 +260,7 @@ Every run writes `runs/<timestamp>/` so a stall can be replayed and fixed offlin
 | `step-NNN-raw.png` | the capture |
 | `step-NNN.png` | items numbered in blue, accessibility ones orange, the chosen one red, the focused field green |
 | `step-NNN-payload.txt` | the exact `state` and criteria sent to TypeSafe, then every item with source, role, box, click point, confidence, then the off-screen controls |
-| `step-NNN-answers.json` | every probability the classifier returned, the off-screen controls it was offered, plus `timing` for that step |
+| `step-NNN-answers.json` | every probability the classifier returned, the off-screen controls it was offered, the actions already tried on that screen, the idle and repeat counts the stop rules stood at, plus `timing` for that step |
 
 Each step also logs what it cost, so a slow phase is obvious:
 

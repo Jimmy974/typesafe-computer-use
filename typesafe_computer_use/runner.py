@@ -202,7 +202,9 @@ def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
     timing["total"] = round(time.perf_counter() - started, 3)
     state.timings.append(timing)
 
-    prefix.with_name(prefix.name + "-answers.json").write_text(json.dumps(answers(decision, screen, items, timing), indent=2))
+    prefix.with_name(prefix.name + "-answers.json").write_text(
+        json.dumps(answers(decision, screen, items, timing, tried, state), indent=2)
+    )
     log(f"  files: {prefix.name}-raw.png, {prefix.name}.png, {prefix.name}-payload.txt, {prefix.name}-answers.json")
     log(format_timing(timing))
 
@@ -285,8 +287,10 @@ def repeating(state: RunState, what: str, log: Log) -> bool:
     return False
 
 
-def answers(decision: Decision, screen: Screen, items: list[Item], timing: dict[str, float]) -> dict:
-    """What the classifier returned for this step, plus what it cost."""
+def answers(
+    decision: Decision, screen: Screen, items: list[Item], timing: dict[str, float], tried: list[str], state: RunState
+) -> dict:
+    """What the classifier returned for this step, plus what it cost and where the stop rules stand."""
     return {
         "kind": decision.kind.choice,
         "kind_confidence": decision.kind.confidence,
@@ -301,6 +305,9 @@ def answers(decision: Decision, screen: Screen, items: list[Item], timing: dict[
         "offscreen_controls": offscreen_records(screen.offscreen),
         "chosen": decision.chosen,
         "confidence": decision.confidence,
+        "already_tried_on_this_screen": tried,
+        "idle_actions": state.idle,
+        "repeated_actions": state.repeats,
         "timing": timing,
         "items": [asdict(it) for it in items],
         "field": screen.field.record() if screen.field else None,

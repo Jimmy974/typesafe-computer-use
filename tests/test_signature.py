@@ -1,7 +1,9 @@
 from dataclasses import replace
+from types import SimpleNamespace
 
+from typesafe_computer_use.decide import Decision
 from typesafe_computer_use.models import LINES_PER_DIFFERENCE, Field, same_screen, signature
-from typesafe_computer_use.runner import MAX_REPEATS, RunState, earlier_screens, repeating, tried_here
+from typesafe_computer_use.runner import MAX_REPEATS, RunState, answers, earlier_screens, repeating, tried_here
 
 
 def texts(*words: str):
@@ -105,3 +107,15 @@ def test_a_wait_is_neither_a_repeat_nor_something_the_classifier_is_told_it_trie
     assert not repeating(state, "clicked 'Buy'", lines.append)  # one repeat is a warning shot
     assert repeating(state, "clicked 'Buy'", lines.append) and state.outcome == "stalled"
     assert tried_here(state) == ["clicked 'Buy'"] * MAX_REPEATS + ["clicked 'Buy'"]
+
+
+def test_the_step_record_carries_the_stop_rules_standing(screen, make_item):
+    kind = SimpleNamespace(choice="click_item", confidence=0.9, probabilities={"click_item": 0.9})
+    item = SimpleNamespace(choice="0", confidence=0.8, probabilities={"0": 0.8})
+    site = SimpleNamespace(choice="none", confidence=1.0, probabilities={"none": 1.0})
+    decision = Decision(kind=kind, item=item, site=site)
+    state = RunState(idle=1, repeats=0)
+    record = answers(decision, screen, [make_item(0, "Buy")], {"total": 0.5}, ["clicked 'Terms'"], state)
+    assert record["already_tried_on_this_screen"] == ["clicked 'Terms'"]
+    assert record["idle_actions"] == 1 and record["repeated_actions"] == 0
+    assert record["chosen"] == "0" and record["items"][0]["text"] == "Buy"
