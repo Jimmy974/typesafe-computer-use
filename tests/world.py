@@ -65,6 +65,19 @@ def cell_box(n: int, k: int, columns: int) -> tuple[float, float, float, float]:
 
 
 @dataclass(frozen=True)
+class Ref:
+    """An accessibility element handle, the opaque object an action is sent to.
+
+    The real one is a PyObjC element; here it only has to be the same object every capture and to
+    say what it stands for. An element the loop presses is named by the action pressing it applies
+    ("click:Tickets"); a text field is named by its label. The world keeps one Ref per name and
+    tells the two kinds apart by which cache holds it, so a stray ref reads as neither.
+    """
+
+    name: str
+
+
+@dataclass(frozen=True)
 class Cell:
     """One item of the current page: its text, its role, the row it sits in, and its pixel box."""
 
@@ -122,10 +135,8 @@ class World:
         self.fake: FakeTypeSafe | None = None  # the classifier `drive` built, for fake.states
         self.loading = {p.name: p.loads_in for p in pages}
         self.ticks = 0  # captures taken so far, so a page can show something that moves on its own
-        self._actions: dict[int, str] = {}  # id(ref) -> the action pressing that element applies
-        self._refs: dict[str, object] = {}  # action -> the element, so a ref stays the same object
-        self._labels: dict[int, str] = {}  # id(field ref) -> the field's label
-        self._fields: dict[str, object] = {}
+        self._refs: dict[str, Ref] = {}  # action -> the element, so a ref stays the same object
+        self._fields: dict[str, Ref] = {}  # label -> the field's element
 
     # ----- the world's own state ------------------------------------------------------------
 
@@ -145,10 +156,6 @@ class World:
                 text, role = (cell, "") if isinstance(cell, str) else cell
                 out.append(Cell(text, role, n, cell_box(n, k, len(columns))))
         return out
-
-    def rows(self) -> list[tuple[str, str]]:
-        """(text, role) per item of the current page, in reading order."""
-        return [(c.text, c.role) for c in self.cells()]
 
     def click_action(self, cell: Cell, cells: list[Cell]) -> str:
         """The action clicking this cell applies: by text, or by row when the text is not unique."""
@@ -177,20 +184,16 @@ class World:
         if nxt is not None:
             self.page = self.pages[nxt]
 
-    def _ref(self, action: str) -> object:
+    def _ref(self, action: str) -> Ref:
         """The element that applies `action` when pressed, the same object every capture."""
-        if action not in self._refs:
-            ref = object()
-            self._refs[action] = ref
-            self._actions[id(ref)] = action
-        return self._refs[action]
+        return self._refs.setdefault(action, Ref(action))
 
-    def _field_ref(self, label: str) -> object:
-        if label not in self._fields:
-            ref = object()
-            self._fields[label] = ref
-            self._labels[id(ref)] = label
-        return self._fields[label]
+    def _field_ref(self, label: str) -> Ref:
+        return self._fields.setdefault(label, Ref(label))
+
+    def _label(self, ref: object) -> str | None:
+        """The field this ref stands for, or None when it is not one of this world's fields."""
+        return ref.name if isinstance(ref, Ref) and self._fields.get(ref.name) is ref else None
 
     # ----- the screen ----------------------------------------------------------------------
 
@@ -229,25 +232,27 @@ class World:
         return items
 
     def focused_field(self) -> Field | None:
-        """The page's text field, at the row that carries its label when one does."""
+        """The page's text field, at the row that carries its label.
+
+        A field is placed by the row that reads as its label, so a page that names a field it does
+        not show is a mistake in the scenario rather than a case the world has to invent a box for.
+        """
         label = self.page.field
         if label is None:
             return None
         labelled = next((c for c in self.cells() if c.text == label), None)
-        if labelled is not None:
-            x1, top, x2, _ = labelled.box
-            box = (x1 / SCALE, top / SCALE, (x2 - x1) / SCALE, ROW_TEXT_HEIGHT / SCALE)
-        else:
-            box = (50.0, 50.0, 300.0, 30.0)
+        if labelled is None:
+            raise AssertionError(f"page {self.page.name!r} has a field {label!r} but no row reads it")
+        x1, top, x2, _ = labelled.box
         return Field(
             role="AXTextField",
             label=label,
             placeholder="",
             value=self.typed.get(label, ""),
-            x=box[0],
-            y=box[1],
-            w=box[2],
-            h=box[3],
+            x=x1 / SCALE,
+            y=top / SCALE,
+            w=(x2 - x1) / SCALE,
+            h=ROW_TEXT_HEIGHT / SCALE,
             ref=self._field_ref(label),
         )
 
@@ -270,10 +275,9 @@ class World:
         self.apply(self.click_action(hit, cells) if hit is not None else "click:nothing")
 
     def ax_press(self, ref: object) -> bool:
-        action = self._actions.get(id(ref))
-        if action is None:
+        if not isinstance(ref, Ref) or self._refs.get(ref.name) is not ref:
             return False
-        self.apply(action)
+        self.apply(ref.name)
         return True
 
     def press(self, name: str, command: bool = False) -> None:
@@ -292,11 +296,11 @@ class World:
         """Set the field's value, unless the page is one of those that quietly refuse to take one."""
         if self.page.no_ax_value:
             return False
-        self.apply(f"type:{text}", label=self._labels.get(id(ref)))
+        self.apply(f"type:{text}", label=self._label(ref))
         return True
 
     def ax_value(self, ref: object) -> str | None:
-        return self.typed.get(self._labels.get(id(ref), ""), "")
+        return self.typed.get(self._label(ref) or "", "")
 
     def clear_field(self) -> None:
         self.apply("clear_field")
@@ -347,7 +351,7 @@ class FakeTypeSafe:
 
     Every decision state lands in `states`, so a test can assert what the model was shown. The
     `verify_typed` Noul that `actions._type_text` makes is a different question about a different
-    state, so it goes to `verify_states` and leaves `states` one entry per step.
+    state, so it is answered without being recorded and `states` stays one entry per step.
     """
 
     def __init__(self, policy: Policy, noul: float = 0.95):
@@ -355,8 +359,6 @@ class FakeTypeSafe:
         self.noul = noul
         self.states: list[dict] = []
         self.asked: list[dict] = []  # the questions each decision was asked, so a test can read the criteria offered
-        self.verify_states: list[dict] = []
-        self.steps: list[Step] = []
 
     def __enter__(self) -> FakeTypeSafe:
         return self
@@ -366,12 +368,10 @@ class FakeTypeSafe:
 
     def system_one(self, state: dict, questions: dict) -> SimpleNamespace:
         if any(isinstance(q, Noul) for q in questions.values()):
-            self.verify_states.append(state)
             return SimpleNamespace(answers={name: SimpleNamespace(noul=self.noul) for name in questions})
         self.states.append(state)
         self.asked.append(questions)
         step = self.policy(state, questions)
-        self.steps.append(step)
         kind, target = step[0], step[1]
         confidence = step[2] if len(step) > 2 else DEFAULT_CONFIDENCE
         return SimpleNamespace(answers=self._answers(state, questions, kind, target, confidence))

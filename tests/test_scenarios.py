@@ -377,7 +377,9 @@ def test_l14_a_field_the_writer_declines_is_never_typed_and_the_run_stalls(monke
 
     assert state.outcome == "stalled"
     assert world.typed == {}
-    assert len(state.history) == 3  # MAX_IDLE refusals, none of which touched the machine
+    # The same refusal on the same screen three times over: the repeat rule is what ends it, and
+    # none of the three touched the machine.
+    assert len(state.history) == 3
     assert all("refused" in line for line in state.history)
     assert world.page.name == "login"
     assert world.log == []
@@ -759,7 +761,7 @@ def test_l26_a_refused_action_then_a_good_one_does_not_stall(monkeypatch, tmp_pa
     assert world.log == ["click:Tickets"]  # the refusal never reached the machine
 
 
-def test_l27_scrolling_past_the_end_stops_within_the_idle_budget(monkeypatch, tmp_path):
+def test_l27_scrolling_past_the_end_stops_as_a_repeated_action(monkeypatch, tmp_path):
     listing = "https://example.com/list"
     world = World(
         [
@@ -771,13 +773,20 @@ def test_l27_scrolling_past_the_end_stops_within_the_idle_budget(monkeypatch, tm
     state = drive(world, always_scroll_policy, goal=GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path)
 
     assert state.outcome == "stalled"
-    assert state.history == ["scrolled down"] * 4  # one that moved, then three at the bottom
+    # One scroll that moved, then three at the bottom: the last of those is the second scroll
+    # already taken on this screen, so the repeat rule ends it.
+    assert state.history == ["scrolled down"] * 4
     assert world.page.name == "list2"
 
 
 def answer_packet(writer: FakeWriter) -> dict:
     """The packet of the writer's last call: the one that composed the answer."""
     return json.loads(writer.requests[-1]["messages"][0]["content"][-1]["text"])
+
+
+def step_record(tmp_path, step: int) -> dict:
+    """The answers file the loop wrote for one step, which carries where the stop rules stood."""
+    return json.loads((tmp_path / "run" / f"step-{step:03d}-answers.json").read_text())
 
 
 def test_l28_the_answer_can_use_a_screen_seen_on_the_way(monkeypatch, tmp_path):
@@ -924,7 +933,9 @@ def test_l32b_a_feed_that_never_grows_is_a_stall(monkeypatch, tmp_path):
     state = drive(world, policy, goal=GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path)
 
     assert state.outcome == "stalled"
-    assert state.history == ["clicked 'Load more'"] * 3  # the repeat rule ends it one step before the idle rule would
+    # Three clicks either way: the repeat rule fires on the third, and with it gone the idle rule
+    # would stop step 4 before it acted. The two rules agree here; L10 and L16 tell them apart.
+    assert state.history == ["clicked 'Load more'"] * 3
 
 
 def coldplay_policy(state: dict, questions: dict) -> tuple:
@@ -1245,7 +1256,11 @@ def test_l37_a_small_modal_on_a_dense_page_is_not_mistaken_for_no_change(monkeyp
     assert state.history == ["clicked 'Buy'", "clicked 'Close'", "clicked 'Buy'"]
     assert world.page.name == "checkout"
     assert world.log == ["click:Buy", "click:Close", "click:Buy"]
-    assert state.idle == 0  # the modal opening and closing both counted as the screen moving
+    # Step 2 captured the modal and step 3 the page behind it again. Two lines over forty is well
+    # under the one-in-ten bar, so only the absolute one-line limit can call either a new screen:
+    # were it not there, step 2 would read as the first idle action and step 3 as the second.
+    assert step_record(tmp_path, 2)["idle_actions"] == 0
+    assert step_record(tmp_path, 3)["idle_actions"] == 0
 
 
 def two_tickers(world: World) -> list[str]:
