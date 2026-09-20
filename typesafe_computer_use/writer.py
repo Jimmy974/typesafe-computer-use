@@ -124,12 +124,19 @@ class Answer:
 
 
 def compose_answer(
-    writer: anthropic.Anthropic, goal: str, screen: Screen, items: list[Item], history: list[str], stopped: str
+    writer: anthropic.Anthropic,
+    goal: str,
+    screen: Screen,
+    items: list[Item],
+    history: list[str],
+    stopped: str,
+    earlier: list[dict] | None = None,
 ) -> Answer:
     """What to tell the user now that the run is over: the result when the screen holds it, where things stand when not.
 
     The classifier can stop on the right page but cannot say what the page says. The writer reads the
     capture itself as well as its text, since OCR misreads a letter here and there and drops layout.
+    `earlier` is the text of the screens before this one, for a goal whose answer was on the way.
     """
     packet = {
         "goal": goal,
@@ -139,15 +146,17 @@ def compose_answer(
         "frontmost_app": screen.app,
         "browser_active_tab_url": screen.url,
         "screen_text_in_reading_order": [it.text for it in items],
+        **({"earlier_screens": earlier} if earlier else {}),
     }
     data = _structured(
         writer,
         system=(
             "An agent drove a user's computer toward the user's goal and has now stopped. You receive "
-            "the goal, the actions it took, why it stopped, a capture of the screen as it is now, and "
-            "the text read from that screen. Tell the user the result. When the goal asks for "
-            "information, lead with that information, taken only from the screen: never from memory, "
-            "and never a guess. When the goal asks for something to be done, say whether the screen "
+            "the goal, the actions it took, why it stopped, a capture of the screen as it is now, the "
+            "text read from that screen, and the text of the screens it passed through on the way, "
+            "oldest first. Tell the user the result. When the goal asks for information, lead with "
+            "that information, taken only from those screens: never from memory, and never a guess. "
+            "When the goal asks for something to be done, say whether the screen "
             "shows it done. When the screen does not hold the result, say so plainly, then say what is "
             "on screen and the one next step that would get there. Trust the capture over the text "
             "where the two disagree. Plain text, no markdown, four sentences at most. Set achieved to "

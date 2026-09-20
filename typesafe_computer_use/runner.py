@@ -24,6 +24,7 @@ from .writer import Answer, compose_answer
 # action's description says what was attempted and only the next capture says what came of it.
 MAX_IDLE = 3  # consecutive actions that left the screen as it was: refusals, waits on a spinner, scrolls at the bottom
 MAX_REPEATS = 2  # consecutive actions already taken on the same screen earlier in the run: a cycle, or a click that does nothing
+EARLIER_SCREENS = 2  # screens before the last one that the answer may also be read from
 
 # The outcomes that end with an answer, each in words the writer can pass on. A dry run took no
 # action and an abort is the user's own stop, so neither has anything to report.
@@ -127,13 +128,29 @@ def conclude(cfg: RunConfig, ctx: Context, state: RunState, log: Log) -> None:
         screen.image.save(cfg.out / "answer-raw.png")
         state.view = (screen, perceive(screen, MAX_OPTIONS, cfg.goal))
     screen, items = state.view
+    earlier = earlier_screens(state, signature(screen, items))
     try:
-        state.answer = compose_answer(ctx.writer, cfg.goal, screen, items, state.history, stopped)
+        state.answer = compose_answer(ctx.writer, cfg.goal, screen, items, state.history, stopped, earlier)
     except anthropic.APIError as e:
         log(f"\nno answer: the writer failed ({e})")
         return
     verdict = "goal achieved" if state.answer.achieved else "goal not achieved"
     log(f"\nanswer ({verdict}, {time.perf_counter() - started:.1f}s):\n  {state.answer.text}")
+
+
+def earlier_screens(state: RunState, final: Signature, limit: int = EARLIER_SCREENS) -> list[dict]:
+    """The last few distinct screens the run passed through before the one it ended on, oldest first.
+
+    The goal may ask for something that was on the way (a price on the listing, not on the checkout),
+    and the run's own captures are the only place the answer may come from.
+    """
+    out: list[Signature] = []
+    for seen, _ in reversed(state.seen):
+        if len(out) == limit:
+            break
+        if not same_screen(seen, final) and not any(same_screen(seen, kept) for kept in out):
+            out.append(seen)
+    return [{"app": app, "url": url, "text": list(text)} for app, url, _, text in reversed(out)]
 
 
 def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log) -> bool:

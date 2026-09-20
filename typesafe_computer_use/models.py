@@ -35,7 +35,7 @@ class Abort(Exception):
     """Raised when the user triggers an escape hatch."""
 
 
-Signature = tuple[str, str | None, str | None, frozenset[str]]  # app, URL, the focused field, the text on screen
+Signature = tuple[str, str | None, str | None, tuple[str, ...]]  # app, URL, the focused field, the text in reading order
 SAME_SCREEN_OVERLAP = 0.9  # share of the text two captures have in common for them to count as one screen
 
 
@@ -44,7 +44,7 @@ def signature(screen: Screen, items: list[Item]) -> Signature:
     focus, and the text on it. A click that only moves the focus changes no text, but it changes
     what the next action can do, so it counts."""
     focused = f"{screen.field.role}:{screen.field.label}" if screen.field else None
-    return (screen.app, screen.url, focused, frozenset(it.text for it in items))
+    return (screen.app, screen.url, focused, tuple(it.text for it in items))
 
 
 def same_screen(a: Signature, b: Signature) -> bool:
@@ -55,7 +55,7 @@ def same_screen(a: Signature, b: Signature) -> bool:
     """
     if a[:3] != b[:3]:
         return False
-    texts_a, texts_b = a[3], b[3]
+    texts_a, texts_b = set(a[3]), set(b[3])
     if not texts_a and not texts_b:
         return True
     return len(texts_a & texts_b) / max(len(texts_a), len(texts_b)) >= SAME_SCREEN_OVERLAP
