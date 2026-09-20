@@ -5,17 +5,18 @@ from typesafe_computer_use.runner import RunState, earlier_screens, tried_here
 
 
 def texts(*words: str):
-    return tuple(words)
+    """Lines one per row, top to bottom."""
+    return tuple((word, row) for row, word in enumerate(words))
 
 
 def test_a_signature_names_the_app_the_page_the_focus_and_the_text_in_reading_order(screen, make_item):
     field = Field(role="AXTextField", label="Search", placeholder="", value="", x=0, y=0, w=10, h=10)
     focused = replace(screen, field=field, url="https://example.com/")
-    assert signature(focused, [make_item(0, "Search"), make_item(1, "Go")]) == (
+    assert signature(focused, [make_item(0, "Search"), make_item(1, "Go", y1=300, y2=340)]) == (
         "Google Chrome",
         "https://example.com/",
         "AXTextField:Search",
-        texts("Search", "Go"),
+        (("Search", 3), ("Go", 8)),  # rows of 20 points, at scale 2: centers at 115 px and 320 px
     )
     assert signature(screen, [])[2] is None
 
@@ -31,8 +32,8 @@ def test_the_same_text_on_another_page_or_app_or_focus_is_another_screen():
 def test_a_clock_or_a_ticker_does_not_make_a_new_screen():
     lines = [f"Gate {n}" for n in range(9)]
     before = ("Google Chrome", None, None, texts(*lines, "12:00"))
-    after = ("Google Chrome", None, None, texts("12:01", *lines))
-    assert same_screen(before, after)  # order is not identity either: a reflowed page is the same page
+    after = ("Google Chrome", None, None, texts(*lines, "12:01"))
+    assert same_screen(before, after)
     assert SAME_SCREEN_OVERLAP == 0.9
 
 
@@ -40,6 +41,13 @@ def test_a_page_that_gained_a_section_is_a_new_screen():
     before = ("Google Chrome", None, None, texts("Home", "Tickets"))
     after = ("Google Chrome", None, None, texts("Home", "Tickets", "Buy", "Terms", "Dates"))
     assert not same_screen(before, after)
+
+
+def test_a_dense_page_scrolled_by_a_tenth_is_a_new_screen():
+    lines = [f"Row {n}" for n in range(30)]
+    before = ("Google Chrome", None, None, texts(*lines))
+    after = ("Google Chrome", None, None, texts(*lines[3:], "Row 30", "Row 31", "Row 32"))
+    assert not same_screen(before, after)  # 27 of 30 lines are still there, but every one moved
     assert same_screen(("Google Chrome", None, None, texts()), ("Google Chrome", None, None, texts()))
 
 
@@ -53,16 +61,17 @@ def test_tried_here_lists_the_actions_taken_on_the_current_screen_oldest_first()
 
 def test_earlier_screens_are_the_distinct_ones_before_the_last_oldest_first():
     home = ("Google Chrome", "https://a/", None, texts("Home", "Tickets"))
-    tickets = ("Google Chrome", "https://a/tickets", None, texts("Standard $45", "Buy"))
-    tickets_reflowed = ("Google Chrome", "https://a/tickets", None, texts("Buy", "Standard $45"))
+    rows = [f"Row {n}" for n in range(9)]
+    tickets = ("Google Chrome", "https://a/tickets", None, texts("Standard $45", *rows, "12:00"))
+    tickets_later = ("Google Chrome", "https://a/tickets", None, texts("Standard $45", *rows, "12:01"))  # the same screen
     checkout = ("Google Chrome", "https://a/checkout", None, texts("Order summary", "Pay now"))
-    state = RunState(seen=[(home, "clicked 'Tickets'"), (tickets, "waited"), (tickets_reflowed, "clicked 'Buy'")])
+    state = RunState(seen=[(home, "clicked 'Tickets'"), (tickets, "waited"), (tickets_later, "clicked 'Buy'")])
     assert earlier_screens(state, checkout) == [
         {"app": "Google Chrome", "url": "https://a/", "text": ["Home", "Tickets"]},
-        {"app": "Google Chrome", "url": "https://a/tickets", "text": ["Buy", "Standard $45"]},
+        {"app": "Google Chrome", "url": "https://a/tickets", "text": ["Standard $45", *rows, "12:01"]},
     ]
     assert earlier_screens(state, checkout, limit=1) == [
-        {"app": "Google Chrome", "url": "https://a/tickets", "text": ["Buy", "Standard $45"]},
+        {"app": "Google Chrome", "url": "https://a/tickets", "text": ["Standard $45", *rows, "12:01"]},
     ]
     assert earlier_screens(state, tickets) == [{"app": "Google Chrome", "url": "https://a/", "text": ["Home", "Tickets"]}]
     assert earlier_screens(RunState(), checkout) == []

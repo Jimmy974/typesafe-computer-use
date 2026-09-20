@@ -150,7 +150,7 @@ def earlier_screens(state: RunState, final: Signature, limit: int = EARLIER_SCRE
             break
         if not same_screen(seen, final) and not any(same_screen(seen, kept) for kept in out):
             out.append(seen)
-    return [{"app": app, "url": url, "text": list(text)} for app, url, _, text in reversed(out)]
+    return [{"app": app, "url": url, "text": [text for text, _ in lines]} for app, url, _, lines in reversed(out)]
 
 
 def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log) -> bool:
