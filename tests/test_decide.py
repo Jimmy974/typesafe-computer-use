@@ -114,6 +114,12 @@ def test_a_duplicated_label_names_its_row_and_a_unique_one_does_not(screen, make
         make_item(6, "Terms", y1=300, y2=330),
     ]
     assert row_mates(items) == {2: ["Bruno Mars", "Sep 25"], 5: ["Coldplay", "Oct 2"]}
+    wide = [make_item(i, f"Col {i}", x1=100 + 60 * i, x2=150 + 60 * i) for i in range(5)] + [
+        make_item(5, "Buy", x1=420, x2=480),
+        make_item(6, "Buy", x1=420, x2=480, y1=200, y2=230),
+    ]
+    assert row_mates(wide)[5] == ["Col 0", "Col 1", "Col 2"]  # a criterion stays short
+    assert row_mates(wide, limit=None)[5] == [f"Col {i}" for i in range(5)]  # a history line takes the whole row
     crit = item_criteria(screen, items)
     assert crit["5"].endswith("; in the row of 'Coldplay', 'Oct 2')")
     assert "row" not in crit["3"] and "row" not in crit["6"]

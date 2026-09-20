@@ -60,14 +60,15 @@ def kind_criteria(browser: str, email: str | None, offscreen: bool = False) -> d
     return {**clicks, **fixed_actions(browser, email)}
 
 
-ROW_MATES = 3  # how many neighbours name a duplicated item's row
+ROW_MATES = 3  # how many neighbours name a duplicated item's row in a criterion; the history line takes them all
 
 
-def row_mates(items: list[Item], limit: int = ROW_MATES) -> dict[int, list[str]]:
+def row_mates(items: list[Item], limit: int | None = ROW_MATES) -> dict[int, list[str]]:
     """Item index -> the texts sharing its row, left to right, for every item whose text another item repeats.
 
     Three rows of events each end in a 'Buy'. The label says nothing about which; the row does,
-    and the row is a fact the layout holds, so the code reads it and hands it over.
+    and the row is a fact the layout holds, so the code reads it and hands it over. `limit`
+    keeps a criterion short; None takes the whole row, for a line that has to identify it.
     """
     counts = Counter(it.text for it in items)
     out: dict[int, list[str]] = {}

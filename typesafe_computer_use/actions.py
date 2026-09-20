@@ -33,8 +33,9 @@ def perform(decision: Decision, screen: Screen, items: list[Item], ctx: Context)
     by_index = {str(it.index): it for it in items}
     if key in by_index:
         what = click_item(by_index[key], screen)
-        mates = row_mates(items).get(int(key))
+        mates = row_mates(items, limit=None).get(int(key))
         # Three rows each end in a Buy: the line must say which, or trying one marks them all as tried.
+        # The whole row goes in, so two rows that open alike still get lines of their own.
         return f"{what} beside {', '.join(repr(m) for m in mates)}" if mates else what
     if key.startswith(OFFSCREEN_PREFIX):
         return press_offscreen(key[len(OFFSCREEN_PREFIX) :], screen)
