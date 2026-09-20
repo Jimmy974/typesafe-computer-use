@@ -35,13 +35,21 @@ def ax_count(items: list[Item]) -> int:
     return sum(1 for it in items if it.from_ax)
 
 
-def render_payload(goal: str, screen: Screen, items: list[Item], history: list[str], browser: str, email: str | None) -> str:
+def render_payload(
+    goal: str,
+    screen: Screen,
+    items: list[Item],
+    history: list[str],
+    browser: str,
+    email: str | None,
+    tried: list[str] | None = None,
+) -> str:
     """Exactly what goes to TypeSafe for this screen, plus a table of every item."""
     parts = [
         RULE,
         "STATE  (sent as `state`)",
         RULE,
-        json.dumps(base_state(goal, screen, items, history), indent=2),
+        json.dumps(base_state(goal, screen, items, history, tried), indent=2),
         "",
         RULE,
         "QUESTION kind  (Choice criteria)",

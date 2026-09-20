@@ -90,7 +90,9 @@ def site_criteria() -> dict[str, str]:
     }
 
 
-def base_state(goal: str, screen: Screen, items: list[Item], history: list[str]) -> dict:
+def base_state(goal: str, screen: Screen, items: list[Item], history: list[str], tried: list[str] | None = None) -> dict:
+    """The facts the classifier reads. `tried` lists the actions already taken on this same screen
+    earlier in the run, each of which led back here: a fact the code knows and the model cannot."""
     hints = date_hints(items, screen)
     return {
         "goal": goal,
@@ -99,6 +101,7 @@ def base_state(goal: str, screen: Screen, items: list[Item], history: list[str])
         "browser_active_tab_url": screen.url,
         "focused_field": screen.field.summary() if screen.field else None,
         "previous_actions": history[-8:],
+        "already_tried_on_this_screen": list(tried or []),
         "screen_items_in_reading_order": [
             {
                 "i": it.index,
@@ -154,14 +157,22 @@ class Decision:
 
 
 def decide(
-    client: TypeSafeClient, goal: str, screen: Screen, items: list[Item], history: list[str], browser: str, email: str | None
+    client: TypeSafeClient,
+    goal: str,
+    screen: Screen,
+    items: list[Item],
+    history: list[str],
+    browser: str,
+    email: str | None,
+    tried: list[str] | None = None,
 ) -> Decision:
     questions = {
         "kind": Choice(
             instructions=(
                 "You are driving this computer one action at a time. Which kind of action "
                 "makes the most progress toward the goal right now? Do not repeat an action "
-                "that was just taken unless the screen changed."
+                "that was just taken unless the screen changed, and never one listed as already "
+                "tried on this screen: each of those led straight back here."
             ),
             criteria=kind_criteria(browser, email, bool(screen.offscreen)),
         ),
@@ -192,7 +203,7 @@ def decide(
             ),
             criteria=offscreen_criteria(screen.offscreen),
         )
-    answers = client.system_one(state=base_state(goal, screen, items, history), questions=questions).answers
+    answers = client.system_one(state=base_state(goal, screen, items, history, tried), questions=questions).answers
     return Decision(kind=answers["kind"], item=answers.get("item"), site=answers["site"], offscreen=answers.get("offscreen"))
 
 

@@ -83,8 +83,15 @@ Clear the terminal first. It is on screen, so its text is OCR input.
 
 **Stopping a live run.** Ctrl-C when the terminal has focus, or slam the mouse into the
 top-left corner of the screen from any app. The loop also stops itself on `done` or
-`none`, on confidence under `--min-confidence` (0.4), after two consecutive no-ops, or
-at `--steps`.
+`none`, on confidence under `--min-confidence` (0.4), when it stalls, or at `--steps`.
+
+**Stalls.** Nothing in an action's description says what came of it; only the next capture
+does. So each step keeps a signature of the screen (the app, the page, the text on it) and
+the loop stops after three actions in a row that left the screen as it was (a refused
+action, a wait on a page still loading, a scroll that has run out of page) or after two in a
+row that were already taken on the same screen earlier in the run (a click that does
+nothing, or a cycle through two pages). Two captures count as the same screen when nine
+tenths of their text matches, so a clock or a ticker does not hide a stall.
 
 **The answer.** When the loop stops itself, the writer reads the screen it stopped on
 and prints the result: the information the goal asked for, or where things stand and
@@ -205,6 +212,7 @@ on the app, and the node and time caps bind first on a big tree: Notes and Chrom
 | `type_text` | the writer composes the string; it is set on the focused element through the accessibility tree, with keystrokes as the fallback when the value does not read back, and a TypeSafe Noul then checks the field's value |
 | `type_email` | fills in `$CLICKER_EMAIL` the same way; refused unless a text field is focused |
 | `press_enter`, `press_escape` | keyboard |
+| `go_back` | Cmd-[, the browser's Back, when the last click led somewhere unhelpful |
 | `scroll_down`, `scroll_up` | 10 lines, after parking the cursor over the frontmost window |
 | `wait` | screen still loading |
 | `done`, `none` | stop |
@@ -276,6 +284,11 @@ typesafe_computer_use/
   cli.py          `clicker` and `clicker-inspect`
 tests/            pure logic: dates, merging, reading order, echo filter, config,
                   decisions, the tree walk against a fake tree
+  world.py        a simulated computer: pages, controls, fields, and what each action
+                  does to them, driven by the real step loop with a policy as classifier
+  test_scenarios.py
+                  tasks of increasing difficulty on that computer, L1 upward; a failure
+                  here says the architecture cannot do that task
 ```
 
 A Linux port replaces `macos.py` with xdotool and AT-SPI, and swaps Vision OCR for
@@ -298,7 +311,16 @@ uv run ruff check . && uv run ruff format --check .
 uv run pytest -q
 ```
 
-CI runs the same on macOS. See [CONTRIBUTING.md](CONTRIBUTING.md).
+CI runs the same on macOS, and the tests again on Linux: they are pure logic, and
+`tests/conftest.py` stands in for the platform modules where they cannot be installed.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### Growing the architecture
+
+`tests/test_scenarios.py` is the place to show that a task is beyond the loop. Write the
+page graph and a policy for it, assert the outcome, and leave it failing with `xfail`
+until the loop can do it; then fix the loop, not the scenario. Every stop rule above was
+found or fixed that way.
 
 ## License
 

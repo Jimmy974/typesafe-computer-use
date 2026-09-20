@@ -146,14 +146,15 @@ def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
     state.view = (screen, items)
     if not screen_moved(state, screen, items, log):
         return False
+    tried = tried_here(state)
     prefix = cfg.out / f"step-{step:03d}"  # three digits, so a run of 100 steps still lists in order
     screen.image.save(prefix.with_name(prefix.name + "-raw.png"))
     prefix.with_name(prefix.name + "-payload.txt").write_text(
-        render_payload(cfg.goal, screen, items, state.history, ctx.browser, ctx.email)
+        render_payload(cfg.goal, screen, items, state.history, ctx.browser, ctx.email, tried)
     )
 
     with phase(timing, "decide"):
-        decision = decide(ctx.typesafe, cfg.goal, screen, items, state.history, ctx.browser, ctx.email)
+        decision = decide(ctx.typesafe, cfg.goal, screen, items, state.history, ctx.browser, ctx.email, tried)
     by_index = {str(it.index): it for it in items}
     annotate(screen, items, decision.chosen, prefix.with_suffix(".png"))
 
@@ -236,6 +237,11 @@ def screen_moved(state: RunState, screen: Screen, items: list[Item], log: Log) -
         state.outcome = "stalled"
         return False
     return True
+
+
+def tried_here(state: RunState) -> list[str]:
+    """The actions already taken on the screen now showing, oldest first, for the classifier to steer around."""
+    return [what for seen, what in state.seen if state.last is not None and same_screen(seen, state.last)]
 
 
 def repeating(state: RunState, now: Signature, what: str, log: Log) -> bool:
