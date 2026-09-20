@@ -1190,7 +1190,7 @@ def test_l36_a_long_run_mixes_everything(monkeypatch, tmp_path):
         "scrolled down",
         "scrolled down",
         "scrolled down",
-        "clicked 'Buy'",
+        "clicked 'Buy' beside 'Coldplay', 'Oct 2', '$60'",
         "pressed Escape",
         "clicked 'Close'",
         "typed email via accessibility",
@@ -1271,3 +1271,66 @@ def test_l38_two_tickers_on_a_dense_page_let_a_futile_run_reach_the_step_limit(m
     assert state.outcome == "step limit"
     assert state.history == ["clicked 'Refresh'"] * 6
     assert world.log == ["click:Refresh"] * 6
+
+
+def picky_buy_policy(state: dict, questions: dict) -> tuple:
+    """Take the first Buy this listing has not been through yet; back out of any checkout but Coldplay's."""
+    texts = [it["text"] for it in state["screen_items_in_reading_order"]]
+    if "Coldplay checkout" in texts:
+        return ("done", None)
+    if any(text.endswith("checkout") for text in texts):
+        return ("go_back", None)
+    for it in state["screen_items_in_reading_order"]:
+        if it["text"] == "Buy":
+            line = "clicked 'Buy' beside " + ", ".join(repr(mate) for mate in it["beside"])
+            if line not in state["already_tried_on_this_screen"]:
+                return ("click_item", it["i"])
+    return ("none", None)
+
+
+def test_l39_the_wrong_buy_is_undone_and_the_right_one_is_not_marked_as_tried(monkeypatch, tmp_path):
+    """Trying one row's Buy must not read as having tried the others: the history line says which row."""
+    world = World(
+        [
+            Page(
+                name="listing",
+                items=[
+                    ["Bruno Mars", "Sep 25", "Buy"],
+                    ["Coldplay", "Oct 2", "Buy"],
+                    ["Adele", "Oct 9", "Buy"],
+                ],
+                url="https://example.com/listing",
+                on={
+                    "click:Buy@0": "bruno_checkout",
+                    "click:Buy@1": "coldplay_checkout",
+                    "click:Buy@2": "adele_checkout",
+                },
+            ),
+            Page(
+                name="bruno_checkout",
+                items=["Bruno Mars checkout", "Pay"],
+                url="https://example.com/checkout/bruno",
+                on={"back": "listing"},
+            ),
+            Page(name="coldplay_checkout", items=["Coldplay checkout", "Pay"], url="https://example.com/checkout/coldplay"),
+            Page(
+                name="adele_checkout",
+                items=["Adele checkout", "Pay"],
+                url="https://example.com/checkout/adele",
+                on={"back": "listing"},
+            ),
+        ]
+    )
+
+    state = drive(world, picky_buy_policy, goal="buy a ticket to Coldplay", monkeypatch=monkeypatch, tmp_path=tmp_path)
+
+    assert state.outcome == "done"
+    assert state.history == [
+        "clicked 'Buy' beside 'Bruno Mars', 'Sep 25'",
+        "went back",
+        "clicked 'Buy' beside 'Coldplay', 'Oct 2'",
+    ]
+    assert world.page.name == "coldplay_checkout"
+    assert world.log == ["click:Buy@0", "back", "click:Buy@1"]
+    assert state.repeats == 0  # the second Buy is a different line, so nothing reads as a repeat
+    assert world.fake.states[2]["already_tried_on_this_screen"] == ["clicked 'Buy' beside 'Bruno Mars', 'Sep 25'"]
