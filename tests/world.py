@@ -43,10 +43,35 @@ Policy = Callable[[dict, dict], Step]
 Rows = list  # of str, or (text, role)
 
 
+COLUMN_GAP = 10.0  # the gutter between two columns of one row, so their boxes do not touch
+
+
 def row_box(n: int) -> tuple[float, float, float, float]:
     """The pixel box of the Nth row, top to bottom."""
     top = ROW_TOP + ROW_HEIGHT * n
     return (ROW_X1, top, ROW_X2, top + ROW_TEXT_HEIGHT)
+
+
+def cell_box(n: int, k: int, columns: int) -> tuple[float, float, float, float]:
+    """The pixel box of column K of N in the Nth row: the row's width, split evenly, minus a gutter.
+
+    A row of one column keeps the whole width, so a page of plain rows lays out exactly as before.
+    """
+    if columns == 1:
+        return row_box(n)
+    top = ROW_TOP + ROW_HEIGHT * n
+    width = ROW_X2 - ROW_X1
+    return (ROW_X1 + width * k / columns, top, ROW_X1 + width * (k + 1) / columns - COLUMN_GAP, top + ROW_TEXT_HEIGHT)
+
+
+@dataclass(frozen=True)
+class Cell:
+    """One item of the current page: its text, its role, the row it sits in, and its pixel box."""
+
+    text: str
+    role: str
+    row: int
+    box: tuple[float, float, float, float]
 
 
 @dataclass
@@ -54,10 +79,13 @@ class Page:
     """One screen of the simulated computer, and what each action does to it.
 
     `items` are rows of text, or (text, role) for a control the app declares through accessibility.
-    A page whose rows change on their own -- a clock, a ticker -- passes a callable(world) instead,
-    which is asked again on every capture.
+    A row that is a list holds several items side by side, laid out left to right across the row:
+    ["Bruno Mars", "Sep 25", "Buy"] is one line of a listing. A page whose rows change on their own
+    -- a clock, a ticker -- passes a callable(world) instead, which is asked again on every capture.
     `on` maps an action as the world names it ("click:Tickets", "enter", "type:hello", "open:<url>")
-    to the next page's name, or to a callable(world) returning a name or None to stay. An action
+    to the next page's name, or to a callable(world) returning a name or None to stay. Text that
+    appears more than once on the page cannot name one item, so those clicks are keyed by row
+    instead: "click:Buy@1" is the Buy of the second row. An action
     with no entry leaves the page alone, which is the "nothing happened" case the runner must cope
     with.
     """
@@ -70,6 +98,7 @@ class Page:
     offscreen: tuple[str, ...] = ()  # labels the app exposes without showing
     loads_in: int = 0  # steps of "wait" before the items appear
     no_ax_value: bool = False  # the field refuses to have its value set, so text has to be typed in
+    covered_by: str | None = None  # an overlay eating every mouse click: the text of what is really hit
     on: dict[str, str | Callable[[World], str | None]] = dataclasses.field(default_factory=dict)
 
 
@@ -104,12 +133,27 @@ class World:
     def loading_now(self) -> bool:
         return self.loading[self.page.name] > 0
 
-    def rows(self) -> list[tuple[str, str]]:
-        """(text, role) per row of the current page. A page still loading shows one line."""
+    def cells(self) -> list[Cell]:
+        """Every item of the current page in reading order. A page still loading shows one line."""
         if self.loading_now:
-            return [(LOADING, "")]
+            return [Cell(LOADING, "", 0, row_box(0))]
         items = self.page.items(self) if callable(self.page.items) else self.page.items
-        return [(it, "") if isinstance(it, str) else it for it in items]
+        out = []
+        for n, entry in enumerate(items):
+            columns = entry if isinstance(entry, list) else [entry]
+            for k, cell in enumerate(columns):
+                text, role = (cell, "") if isinstance(cell, str) else cell
+                out.append(Cell(text, role, n, cell_box(n, k, len(columns))))
+        return out
+
+    def rows(self) -> list[tuple[str, str]]:
+        """(text, role) per item of the current page, in reading order."""
+        return [(c.text, c.role) for c in self.cells()]
+
+    def click_action(self, cell: Cell, cells: list[Cell]) -> str:
+        """The action clicking this cell applies: by text, or by row when the text is not unique."""
+        repeated = sum(1 for other in cells if other.text == cell.text) > 1
+        return f"click:{cell.text}@{cell.row}" if repeated else f"click:{cell.text}"
 
     def apply(self, action: str, label: str | None = None, append: bool = False) -> None:
         """Receive one action: record it, then follow the current page's transition for it.
@@ -177,10 +221,11 @@ class World:
         """The rows as items, filling `screen.ax_refs` for the ones the app declared."""
         screen.ax_refs.clear()
         items = []
-        for n, (text, role) in enumerate(self.rows()):
-            items.append(Item(n, text, 1.0, *row_box(n), role=role, source="ax" if role else "ocr"))
-            if role:
-                screen.ax_refs[n] = self._ref(f"click:{text}")
+        cells = self.cells()
+        for n, cell in enumerate(cells):
+            items.append(Item(n, cell.text, 1.0, *cell.box, role=cell.role, source="ax" if cell.role else "ocr"))
+            if cell.role:
+                screen.ax_refs[n] = self._ref(self.click_action(cell, cells))
         return items
 
     def focused_field(self) -> Field | None:
@@ -188,10 +233,10 @@ class World:
         label = self.page.field
         if label is None:
             return None
-        texts = [t for t, _ in self.rows()]
-        if label in texts:
-            _, top, _, _ = row_box(texts.index(label))
-            box = (ROW_X1 / SCALE, top / SCALE, (ROW_X2 - ROW_X1) / SCALE, ROW_TEXT_HEIGHT / SCALE)
+        labelled = next((c for c in self.cells() if c.text == label), None)
+        if labelled is not None:
+            x1, top, x2, _ = labelled.box
+            box = (x1 / SCALE, top / SCALE, (x2 - x1) / SCALE, ROW_TEXT_HEIGHT / SCALE)
         else:
             box = (50.0, 50.0, 300.0, 30.0)
         return Field(
@@ -209,13 +254,20 @@ class World:
     # ----- the machine ---------------------------------------------------------------------
 
     def click_at(self, point: tuple[float, float]) -> None:
-        """A synthetic click, in screen points: find the row it lands on and press that item."""
+        """A synthetic click, in screen points: find the cell it lands on and press that item.
+
+        A page with a `covered_by` overlay takes every mouse click itself, wherever it was aimed:
+        that is a cookie banner over the content. A press through accessibility still reaches the
+        element under it, which is the whole point of pressing rather than clicking.
+        """
         self.mouse.append(point)
+        if self.page.covered_by is not None:
+            self.apply(f"click:{self.page.covered_by}")
+            return
         px, py = point[0] * SCALE, point[1] * SCALE
-        rows = self.rows()
-        n = int((py - ROW_TOP) // ROW_HEIGHT)
-        hit = ROW_X1 <= px <= ROW_X2 and 0 <= n < len(rows) and py <= ROW_TOP + ROW_HEIGHT * n + ROW_TEXT_HEIGHT
-        self.apply(f"click:{rows[n][0]}" if hit else "click:nothing")
+        cells = self.cells()
+        hit = next((c for c in cells if c.box[0] <= px <= c.box[2] and c.box[1] <= py <= c.box[3]), None)
+        self.apply(self.click_action(hit, cells) if hit is not None else "click:nothing")
 
     def ax_press(self, ref: object) -> bool:
         action = self._actions.get(id(ref))
@@ -334,7 +386,10 @@ class FakeTypeSafe:
         return answers
 
     @staticmethod
-    def _item_key(state: dict, text: str) -> str:
+    def _item_key(state: dict, text: str | int) -> str:
+        """The item's key: a policy names it by text, or by index when several items read the same."""
+        if isinstance(text, int):
+            return str(text)
         for it in state["screen_items_in_reading_order"]:
             if it["text"] == text:
                 return str(it["i"])

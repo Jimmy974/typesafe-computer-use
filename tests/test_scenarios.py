@@ -925,3 +925,78 @@ def test_l32b_a_feed_that_never_grows_is_a_stall(monkeypatch, tmp_path):
 
     assert state.outcome == "stalled"
     assert state.history == ["clicked 'Load more'"] * 3  # the repeat rule ends it one step before the idle rule would
+
+
+def coldplay_policy(state: dict, questions: dict) -> tuple:
+    """Three buttons read 'Buy'. Only the row they sit in says which show they buy."""
+    for it in state["screen_items_in_reading_order"]:
+        if it["text"] == "Buy" and "Coldplay" in it.get("beside", []):
+            return ("click_item", it["i"])  # by index: the text alone names three items
+    return ("done", None)
+
+
+def test_l33_duplicate_labels_are_told_apart_by_their_row(monkeypatch, tmp_path):
+    world = World(
+        [
+            Page(
+                name="listing",
+                items=[
+                    ["Bruno Mars", "Sep 25", "Buy"],
+                    ["Coldplay", "Oct 2", "Buy"],
+                    ["Adele", "Oct 9", "Buy"],
+                ],
+                url="https://example.com/listing",
+                on={
+                    "click:Buy@0": "bruno_checkout",
+                    "click:Buy@1": "coldplay_checkout",
+                    "click:Buy@2": "adele_checkout",
+                },
+            ),
+            Page(name="bruno_checkout", items=["Order summary", "Bruno Mars"], url="https://example.com/checkout/bruno"),
+            Page(name="coldplay_checkout", items=["Order summary", "Coldplay"], url="https://example.com/checkout/coldplay"),
+            Page(name="adele_checkout", items=["Order summary", "Adele"], url="https://example.com/checkout/adele"),
+        ]
+    )
+
+    state = drive(world, coldplay_policy, goal="buy a ticket to Coldplay", monkeypatch=monkeypatch, tmp_path=tmp_path)
+
+    assert state.outcome == "done"
+    assert state.history == ["clicked 'Buy'"]
+    assert world.page.name == "coldplay_checkout"
+    assert world.log == ["click:Buy@1"]
+
+    listing = world.fake.states[0]["screen_items_in_reading_order"]
+    chosen = next(it for it in listing if it["text"] == "Buy" and "Coldplay" in it.get("beside", []))
+    assert chosen["beside"] == ["Coldplay", "Oct 2"]
+    assert "in the row of 'Coldplay', 'Oct 2'" in world.fake.asked[0]["item"].criteria[str(chosen["i"])]
+    unique = next(it for it in listing if it["text"] == "Coldplay")
+    assert "beside" not in unique  # nothing else on screen reads 'Coldplay', so the row says nothing new
+
+
+def banner_policy(state: dict, questions: dict) -> tuple:
+    texts = [it["text"] for it in state["screen_items_in_reading_order"]]
+    return ("done", None) if "Order summary" in texts else ("click_item", "Buy")
+
+
+def test_l34_a_banner_covering_the_page_takes_the_first_click(monkeypatch, tmp_path):
+    tickets = "https://example.com/tickets"
+    world = World(
+        [
+            Page(
+                name="tickets",
+                items=["Buy", "Terms", "Accept cookies"],
+                url=tickets,
+                covered_by="Accept cookies",  # the banner is over the page: every click lands on it
+                on={"click:Accept cookies": "tickets_clear"},
+            ),
+            Page(name="tickets_clear", items=["Buy", "Terms"], url=tickets, on={"click:Buy": "checkout"}),
+            Page(name="checkout", items=["Order summary", "Pay now"], url="https://example.com/checkout"),
+        ]
+    )
+
+    state = drive(world, banner_policy, goal=GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path)
+
+    assert state.outcome == "done"
+    assert state.history == ["clicked 'Buy'", "clicked 'Buy'"]  # the loop aimed at Buy twice
+    assert world.log == ["click:Accept cookies", "click:Buy"]  # the banner took the first one
+    assert world.page.name == "checkout"
