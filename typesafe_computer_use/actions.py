@@ -15,7 +15,6 @@ from .models import Field, Item, Screen
 from .writer import compose_text, compose_url
 
 VERIFY_THRESHOLD = 0.5
-NOOP_MARKERS = ("refused", "failed", "waited")
 
 
 @dataclass(frozen=True)
@@ -26,10 +25,6 @@ class Context:
     typesafe: TypeSafeClient
     writer: anthropic.Anthropic | None
     history: list[str]
-
-
-def is_noop(description: str) -> bool:
-    return any(marker in description for marker in NOOP_MARKERS)
 
 
 def perform(decision: Decision, screen: Screen, items: list[Item], ctx: Context) -> str:
@@ -142,9 +137,9 @@ def _type_text(decision, screen: Screen, items, ctx: Context) -> str:
     return f"typed {text!r} into {screen.field.label!r} {how} (verified {p:.2f})"
 
 
-def _key(name: str, description: str):
+def _key(name: str, description: str, command: bool = False):
     def handler(decision, screen, items, ctx) -> str:
-        macos.press(name)
+        macos.press(name, command)
         return description
 
     return handler
@@ -164,6 +159,7 @@ _HANDLERS = {
     "type_text": _type_text,
     "press_enter": _key("return", "pressed Return"),
     "press_escape": _key("escape", "pressed Escape"),
+    "go_back": _key("[", "went back", command=True),
     "scroll_down": _scroll(-10, "scrolled down"),
     "scroll_up": _scroll(10, "scrolled up"),
     "wait": lambda decision, screen, items, ctx: "waited",

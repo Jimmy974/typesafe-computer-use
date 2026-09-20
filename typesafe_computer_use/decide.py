@@ -34,6 +34,10 @@ def fixed_actions(browser: str, email: str | None) -> dict[str, str]:
         ),
         "press_enter": "Press Return to submit the focused form or field.",
         "press_escape": "Press Escape to dismiss a dialog, menu, or popup.",
+        "go_back": (
+            "Go back to the previous page or screen, as the browser's Back button does. Use when the last "
+            "click led somewhere that does not help and the page before it did."
+        ),
         "scroll_down": "Scroll down to reveal more of the page.",
         "scroll_up": "Scroll up.",
         "wait": "Nothing to do yet; the screen is still loading or changing.",

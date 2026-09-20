@@ -11,16 +11,19 @@ import anthropic
 from typesafe_sdk import TypeSafeClient
 
 from . import macos
-from .actions import Context, is_noop, perform
+from .actions import Context, perform
 from .config import DEFAULT_DELAY, DEFAULT_MIN_CONFIDENCE, DEFAULT_STEPS, MAX_OPTIONS
 from .decide import Decision, decide, offscreen_records
-from .models import Abort, Item, Screen
+from .models import Abort, Item, Screen, Signature, same_screen, signature
 from .perception import OcrCache, capture, perceive
 from .report import Log, annotate, ax_count, render_payload, top
 from .timing import format_timing, phase, summarize
 from .writer import Answer, compose_answer
 
-MAX_CONSECUTIVE_NOOPS = 2
+# Two ways a run stalls, both read off the screen rather than off the history line, because an
+# action's description says what was attempted and only the next capture says what came of it.
+MAX_IDLE = 3  # consecutive actions that left the screen as it was: refusals, waits on a spinner, scrolls at the bottom
+MAX_REPEATS = 2  # consecutive actions already taken on the same screen earlier in the run: a cycle, or a click that does nothing
 
 # The outcomes that end with an answer, each in words the writer can pass on. A dry run took no
 # action and an abort is the user's own stop, so neither has anything to report.
@@ -54,8 +57,10 @@ class RunConfig:
 class RunState:
     history: list[str] = field(default_factory=list)
     timings: list[dict[str, float]] = field(default_factory=list)
-    consecutive_noops: int = 0
-    last_url: str | None = None
+    idle: int = 0  # actions in a row that changed nothing on screen
+    repeats: int = 0  # actions in a row already taken on the same screen
+    last: Signature | None = None  # the screen the last action was taken on
+    seen: list[tuple[Signature, str]] = field(default_factory=list)  # every (screen, action) pair so far
     outcome: str = "crashed"  # every way out of the loop names its own; only an exception leaves this
     ocr_cache: OcrCache = field(default_factory=OcrCache)  # carries one step's OCR into the next
     view: tuple[Screen, list[Item]] | None = None  # the latest capture, until an action makes it stale
@@ -139,6 +144,8 @@ def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
         screen = capture(cfg.image, cfg.app, cfg.url, ctx.browser, timing)
     items = perceive(screen, MAX_OPTIONS, cfg.goal, timing, None if cfg.replay else state.ocr_cache)
     state.view = (screen, items)
+    if not screen_moved(state, screen, items, log):
+        return False
     prefix = cfg.out / f"step-{step:03d}"  # three digits, so a run of 100 steps still lists in order
     screen.image.save(prefix.with_name(prefix.name + "-raw.png"))
     prefix.with_name(prefix.name + "-payload.txt").write_text(
@@ -208,19 +215,44 @@ def resolve(
     with phase(timing, "act"):
         what = perform(decision, screen, items, ctx)
     state.view = None
-    repeated = bool(state.history) and state.history[-1] == what and screen.url == state.last_url
-    state.last_url = screen.url
     state.history.append(what)
     log(f"  did: {what}")
-    if is_noop(what) or repeated:
-        state.consecutive_noops += 1
-        if state.consecutive_noops >= MAX_CONSECUTIVE_NOOPS:
-            log(f"  {MAX_CONSECUTIVE_NOOPS} consecutive no-ops; stopping")
-            state.outcome = "stalled"
-            return False
-    else:
-        state.consecutive_noops = 0
+    return not repeating(state, signature(screen, items), what, log)
+
+
+def screen_moved(state: RunState, screen: Screen, items: list[Item], log: Log) -> bool:
+    """Count the actions that left the screen as it was, and stop once too many did in a row.
+
+    The capture is the only witness to what an action did. Compared with the one the action was
+    taken on, an unchanged screen means a refused action, a wait on a page still loading, or a
+    scroll that has run out of page; any of them is fine a couple of times.
+    """
+    now = signature(screen, items)
+    if state.last is not None:
+        state.idle = state.idle + 1 if same_screen(now, state.last) else 0
+    state.last = now
+    if state.idle >= MAX_IDLE:
+        log(f"  the last {MAX_IDLE} actions changed nothing on screen; stopping")
+        state.outcome = "stalled"
+        return False
     return True
+
+
+def repeating(state: RunState, now: Signature, what: str, log: Log) -> bool:
+    """Count the actions already taken on the same screen earlier, and stop once too many run in a row.
+
+    The same action on the same screen led somewhere once, and this is where it led: back here.
+    That is a cycle through two pages as much as a button that does nothing. A wait is exempt,
+    since waiting is repeating by design; the idle count bounds it instead.
+    """
+    if what != "waited":
+        state.repeats = state.repeats + 1 if any(a == what and same_screen(s, now) for s, a in state.seen) else 0
+    state.seen.append((now, what))
+    if state.repeats >= MAX_REPEATS:
+        log(f"  {MAX_REPEATS} actions in a row already taken on the same screen; stopping")
+        state.outcome = "stalled"
+        return True
+    return False
 
 
 def answers(decision: Decision, screen: Screen, items: list[Item], timing: dict[str, float]) -> dict:

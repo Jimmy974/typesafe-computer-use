@@ -8,7 +8,6 @@ written and marked xfail with the reason, never weakened until it passes.
 
 from __future__ import annotations
 
-import pytest
 from world import FakeWriter, Page, World, drive, scripted
 
 GOAL = "buy a ticket to the next show"
@@ -176,10 +175,6 @@ def long_list_policy(state: dict, questions: dict) -> tuple:
     return ("scroll_down", None)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="a repeated history line on an unchanged URL counts as a no-op, so the third scroll of one long page stalls the run",
-)
 def test_l7_a_long_page_is_scrolled_three_times(monkeypatch, tmp_path):
     listing = "https://example.com/list"  # scrolling one page never changes the URL
     world = World(
@@ -200,10 +195,6 @@ def test_l7_a_long_page_is_scrolled_three_times(monkeypatch, tmp_path):
     assert world.log == ["scroll_down", "scroll_down", "scroll_down", "click:Buy"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="'waited' reads as a no-op, so two waits in a row stop the run and a page needing three never finishes loading",
-)
 def test_l8_a_slow_page_needs_three_waits(monkeypatch, tmp_path):
     world = World(
         [

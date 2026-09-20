@@ -35,6 +35,29 @@ class Abort(Exception):
     """Raised when the user triggers an escape hatch."""
 
 
+Signature = tuple[str, str | None, frozenset[str]]  # app, URL, the text on screen
+SAME_SCREEN_OVERLAP = 0.9  # share of the text two captures have in common for them to count as one screen
+
+
+def signature(screen: Screen, items: list[Item]) -> Signature:
+    """What identifies a screen from one step to the next: the app, the page, and the text on it."""
+    return (screen.app, screen.url, frozenset(it.text for it in items))
+
+
+def same_screen(a: Signature, b: Signature) -> bool:
+    """Whether two captures show the same screen, allowing for a clock, a ticker, or an OCR slip.
+
+    The text sets must overlap by nine tenths, measured against the larger one so that a page that
+    gained a whole section counts as changed and one that lost a line counts as the same.
+    """
+    if a[:2] != b[:2]:
+        return False
+    texts_a, texts_b = a[2], b[2]
+    if not texts_a and not texts_b:
+        return True
+    return len(texts_a & texts_b) / max(len(texts_a), len(texts_b)) >= SAME_SCREEN_OVERLAP
+
+
 @dataclass(frozen=True)
 class Item:
     """One clickable thing: text plus its pixel box on the capture.
