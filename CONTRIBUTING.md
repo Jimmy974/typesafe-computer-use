@@ -16,6 +16,15 @@ so a stall can be replayed offline with `--image`.
 - Platform calls live in `macos.py` only.
 - Never add a path that types a password.
 
+## A task the loop cannot do
+
+Write it as a scenario in `tests/test_scenarios.py`: a page graph on the simulated
+computer in `tests/world.py`, a policy standing in for the classifier, and assertions on
+the outcome, the final page, and the actions the world received. Leave it failing under
+`xfail` until the loop can do it, then fix the loop rather than the scenario. The
+scenarios run the real `runner.run`, so a failure there is an architecture finding, not
+a harness one.
+
 ## Before a pull request
 
 ```

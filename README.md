@@ -112,6 +112,8 @@ AppleScript   ─► frontmost app and pid, active tab URL
 clock         ─► local date and time
 dates.py      ─► "dated 2026-10-13 (in 27 days)" on any block containing a date,
                  "near a line dated ..." on its neighbours
+layout        ─► "in the row of ..." on any label that appears more than once
+runner.py     ─► the actions already tried on this same screen, each of which led back here
                      │
                      ▼
         one TypeSafe request, three Choices, four with off-screen controls
