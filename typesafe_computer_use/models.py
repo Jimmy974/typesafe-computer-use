@@ -35,13 +35,16 @@ class Abort(Exception):
     """Raised when the user triggers an escape hatch."""
 
 
-Signature = tuple[str, str | None, frozenset[str]]  # app, URL, the text on screen
+Signature = tuple[str, str | None, str | None, frozenset[str]]  # app, URL, the focused field, the text on screen
 SAME_SCREEN_OVERLAP = 0.9  # share of the text two captures have in common for them to count as one screen
 
 
 def signature(screen: Screen, items: list[Item]) -> Signature:
-    """What identifies a screen from one step to the next: the app, the page, and the text on it."""
-    return (screen.app, screen.url, frozenset(it.text for it in items))
+    """What identifies a screen from one step to the next: the app, the page, which field has the
+    focus, and the text on it. A click that only moves the focus changes no text, but it changes
+    what the next action can do, so it counts."""
+    focused = f"{screen.field.role}:{screen.field.label}" if screen.field else None
+    return (screen.app, screen.url, focused, frozenset(it.text for it in items))
 
 
 def same_screen(a: Signature, b: Signature) -> bool:
@@ -50,9 +53,9 @@ def same_screen(a: Signature, b: Signature) -> bool:
     The text sets must overlap by nine tenths, measured against the larger one so that a page that
     gained a whole section counts as changed and one that lost a line counts as the same.
     """
-    if a[:2] != b[:2]:
+    if a[:3] != b[:3]:
         return False
-    texts_a, texts_b = a[2], b[2]
+    texts_a, texts_b = a[3], b[3]
     if not texts_a and not texts_b:
         return True
     return len(texts_a & texts_b) / max(len(texts_a), len(texts_b)) >= SAME_SCREEN_OVERLAP
