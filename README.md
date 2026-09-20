@@ -313,6 +313,8 @@ as callables, so only those three bindings change. Nothing else knows the platfo
 - Two identical labels in one row, or in no row at all, get only a coarse region hint and
   split the vote. Ones in different rows are told apart by the text beside them.
 - Only the main display is captured.
+- A repeated action whose effect never shows on screen (a third "New note" in an app that
+  lists nothing) reads as a cycle and stops the run: the capture is the only witness.
 - Using the machine during an `--act` run fights it for focus and the cursor.
 - The site catalog is small on purpose; the writer covers the rest.
 
