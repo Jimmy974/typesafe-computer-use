@@ -70,7 +70,7 @@ def test_earlier_screens_are_the_distinct_ones_before_the_last_oldest_first():
         {"app": "Google Chrome", "url": "https://a/", "text": ["Home", "Tickets"]},
         {"app": "Google Chrome", "url": "https://a/tickets", "text": ["Standard $45", *rows, "12:01"]},
     ]
-    assert earlier_screens(state, checkout, limit=1) == [
+    assert earlier_screens(state, checkout, budget=12) == [  # eleven lines fit; home's two more do not
         {"app": "Google Chrome", "url": "https://a/tickets", "text": ["Standard $45", *rows, "12:01"]},
     ]
     assert earlier_screens(state, tickets) == [{"app": "Google Chrome", "url": "https://a/", "text": ["Home", "Tickets"]}]

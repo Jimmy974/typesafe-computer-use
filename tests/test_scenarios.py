@@ -1000,3 +1000,210 @@ def test_l34_a_banner_covering_the_page_takes_the_first_click(monkeypatch, tmp_p
     assert state.history == ["clicked 'Buy'", "clicked 'Buy'"]  # the loop aimed at Buy twice
     assert world.log == ["click:Accept cookies", "click:Buy"]  # the banner took the first one
     assert world.page.name == "checkout"
+
+
+def crawl_policy(state: dict, questions: dict) -> tuple:
+    """A depth-first crawl written only against the state: take the first untried link, else back out."""
+    texts = [it["text"] for it in state["screen_items_in_reading_order"]]
+    if any("Buy" in action for action in state["previous_actions"]):
+        return ("done", None)
+    if "Buy" in texts:
+        return ("click_item", "Buy")
+    tried = state["already_tried_on_this_screen"]
+    for text in texts:
+        if not text.startswith("Page: ") and f"clicked {text!r}" not in tried:
+            return ("click_item", text)
+    return ("none", None) if "Page: home" in texts else ("go_back", None)
+
+
+def test_l35_a_small_site_is_searched_exhaustively_for_the_one_page_that_sells(monkeypatch, tmp_path):
+    site = "https://example.com"
+    world = World(
+        [
+            Page(
+                name="home",
+                items=["Page: home", "About", "Contact", "Shows"],
+                url=f"{site}/",
+                on={"click:About": "about", "click:Contact": "contact", "click:Shows": "shows"},
+            ),
+            Page(name="about", items=["Page: about"], url=f"{site}/about", on={"back": "home"}),
+            Page(name="contact", items=["Page: contact"], url=f"{site}/contact", on={"back": "home"}),
+            Page(
+                name="shows",
+                items=["Page: shows", "Past", "Upcoming"],
+                url=f"{site}/shows",
+                on={"click:Past": "past", "click:Upcoming": "upcoming", "back": "home"},
+            ),
+            Page(name="past", items=["Page: past"], url=f"{site}/shows/past", on={"back": "shows"}),
+            Page(
+                name="upcoming",
+                items=["Page: upcoming", "Buy"],
+                url=f"{site}/shows/upcoming",
+                on={"click:Buy": "checkout", "back": "shows"},
+            ),
+            Page(name="checkout", items=["Page: checkout", "Order summary"], url=f"{site}/checkout"),
+        ]
+    )
+
+    state = drive(world, crawl_policy, goal="buy a ticket", monkeypatch=monkeypatch, tmp_path=tmp_path)
+
+    assert state.outcome == "done"
+    assert world.page.name == "checkout"
+    assert state.history == [
+        "clicked 'About'",
+        "went back",
+        "clicked 'Contact'",
+        "went back",
+        "clicked 'Shows'",
+        "clicked 'Past'",
+        "went back",
+        "clicked 'Upcoming'",
+        "clicked 'Buy'",
+    ]
+    assert len(state.history) == 9  # nothing stalled: every step of the crawl moved the screen
+
+
+def long_run_policy(state: dict, questions: dict) -> tuple:
+    """One policy for the whole run, reading nothing but the state the loop hands it."""
+    texts = [it["text"] for it in state["screen_items_in_reading_order"]]
+    tried = state["already_tried_on_this_screen"]
+    field = state["focused_field"]
+    if "Loading..." in texts or "Verifying" in texts:
+        return ("wait", None)
+    if state["frontmost_app"] == "Finder":  # the first Finder needs a site; the second only the front
+        return ("use_browser", "other" if "Desktop" in texts else "none")
+    if "Order summary" in texts:
+        return ("done", None)
+    if "Sign up for news" in texts:
+        return ("click_item", "Close") if "pressed Escape" in tried else ("press_escape", None)
+    if field and field["label"] == "Email":
+        return ("press_enter", None) if field["current_value"] else ("type_email", None)
+    for it in state["screen_items_in_reading_order"]:
+        if it["text"] == "Buy" and "Coldplay" in it.get("beside", []):
+            return ("click_item", it["i"])
+    if "Nothing here" in texts:
+        return ("go_back", None)
+    if "Older posts" in texts:
+        return ("go_back", None) if "clicked 'Older posts'" in tried else ("click_item", "Older posts")
+    if "Blog" in texts and "clicked 'Blog'" not in tried:
+        return ("click_item", "Blog")
+    if state.get("offscreen_controls"):
+        return ("press_offscreen", "Show all dates")
+    if "Next" in texts:
+        return ("click_item", "Next")
+    if "Buy" in texts:
+        return ("click_item", "Buy")
+    return ("scroll_down", None)
+
+
+def long_run_world() -> World:
+    shows = "https://shows.example.com"
+    return World(
+        [
+            Page(name="finder", items=["Desktop", "Documents"], url=None, app="Finder", on={f"open:{shows}/": "front"}),
+            Page(
+                name="front",
+                items=["Buy", "Terms", "Accept cookies"],
+                url=f"{shows}/",
+                covered_by="Accept cookies",
+                on={"click:Accept cookies": "listing"},
+            ),
+            Page(
+                name="listing",
+                items=["Listing", "Blog", "Event A"],
+                url=f"{shows}/listing",
+                loads_in=2,
+                offscreen=("Show all dates",),
+                on={"click:Blog": "blog", "press:Show all dates": "dates1"},
+            ),
+            Page(
+                name="blog",
+                items=["Blog post", "Older posts"],
+                url=f"{shows}/blog",
+                on={"click:Older posts": "blog2", "back": "listing"},
+            ),
+            Page(name="blog2", items=["Older posts page", "Nothing here"], url=f"{shows}/blog/older", on={"back": "blog"}),
+            Page(name="dates1", items=["All dates", "Event C"], url=f"{shows}/dates", on={"scroll_down": "dates2"}),
+            Page(name="dates2", items=["More dates", "Event D"], url=f"{shows}/dates", on={"scroll_down": "dates3"}),
+            Page(name="dates3", items=["Even more", "Event E"], url=f"{shows}/dates", on={"scroll_down": "rows"}),
+            Page(
+                name="rows",
+                items=[
+                    ["Bruno Mars", "Sep 25", "$45", "Buy"],
+                    ["Coldplay", "Oct 2", "$60", "Buy"],
+                    ["Adele", "Oct 9", "$80", "Buy"],
+                ],
+                url=f"{shows}/dates/rows",
+                on={"click:Buy@0": "modal", "click:Buy@1": "modal", "click:Buy@2": "modal"},
+            ),
+            Page(
+                name="modal",
+                items=["Sign up for news", "Close"],
+                url=f"{shows}/dates/rows",
+                on={"click:Close": "login"},  # Escape does nothing to this one
+            ),
+            Page(name="login", items=["Sign in", "Email"], url=f"{shows}/login", field="Email", on={"enter": "verifying"}),
+            Page(
+                name="verifying",
+                items=["Verifying", "Almost done"],
+                url=f"{shows}/verify",
+                loads_in=3,
+                on={"wait": "finder2"},  # the page finishes by itself, into a window that steals the front
+            ),
+            Page(name="finder2", items=["Downloads", "receipt.pdf"], url=None, app="Finder", on={"activate": "wiz1"}),
+            Page(name="wiz1", items=["Step 1 of 3", "Next"], url=f"{shows}/signup", on={"click:Next": "wiz2"}),
+            Page(name="wiz2", items=["Step 2 of 3", "Next"], url=f"{shows}/signup", on={"click:Next": "wiz3"}),
+            Page(name="wiz3", items=["Step 3 of 3", "Next"], url=f"{shows}/signup", on={"click:Next": "checkout"}),
+            Page(name="checkout", items=["Order summary", "Pay now"], url=f"{shows}/checkout"),
+        ]
+    )
+
+
+def test_l36_a_long_run_mixes_everything(monkeypatch, tmp_path):
+    world = long_run_world()
+
+    state = drive(
+        world,
+        long_run_policy,
+        goal="buy a ticket to Coldplay and tell me the price",
+        steps=40,
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        writer=FakeWriter(url="https://shows.example.com/"),
+        email="user@example.com",
+    )
+
+    assert state.outcome == "done"
+    assert world.page.name == "checkout"
+    assert state.history == [
+        "opened https://shows.example.com/",
+        "clicked 'Buy'",
+        "waited",
+        "waited",
+        "clicked 'Blog'",
+        "clicked 'Older posts'",
+        "went back",
+        "went back",
+        "pressed 'Show all dates' (off-screen control) via accessibility",
+        "scrolled down",
+        "scrolled down",
+        "scrolled down",
+        "clicked 'Buy'",
+        "pressed Escape",
+        "clicked 'Close'",
+        "typed email via accessibility",
+        "pressed Return",
+        "waited",
+        "waited",
+        "waited",
+        "waited",
+        "activated Google Chrome",
+        "clicked 'Next'",
+        "clicked 'Next'",
+        "clicked 'Next'",
+    ]
+    assert len(state.history) == 25
+    assert world.log[world.log.index("click:Buy@1")] == "click:Buy@1"  # the Coldplay row, picked by what sits beside it
+    login = next(i for i, s in enumerate(world.fake.states) if s["focused_field"] and s["focused_field"]["label"] == "Email")
+    assert "type_email" in world.fake.asked[login]["kind"].criteria
+    assert state.answer is not None and "$60" in state.answer.text  # the price was on a screen the run passed through

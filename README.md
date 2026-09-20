@@ -236,9 +236,9 @@ small packet and a structured reply:
   Code rejects anything that is not a clean https URL with a hostname.
 - **The answer**, once, when the loop stops itself. It receives the goal, every action
   taken, why the run stopped, the text of the last screen, the capture itself, because
-  OCR misreads a letter here and there and drops layout, and the text of the last two
-  distinct screens before it, because the goal may ask for a price that was on the
-  listing and not on the checkout. It returns `{achieved, answer}`, and is told to take
+  OCR misreads a letter here and there and drops layout, and the text of the distinct
+  screens before it, newest first up to 600 lines, because the goal may ask for a price
+  that was on the listing and not on the checkout. It returns `{achieved, answer}`, and is told to take
   the answer from those screens alone. When an action ran after the last capture, the
   screen is captured again first. This one call uses `CLICKER_ANSWER_MODEL`, a stronger
   reader than the per-step writer.

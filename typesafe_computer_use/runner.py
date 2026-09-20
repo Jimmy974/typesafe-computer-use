@@ -24,7 +24,7 @@ from .writer import Answer, compose_answer
 # action's description says what was attempted and only the next capture says what came of it.
 MAX_IDLE = 3  # consecutive actions that left the screen as it was: refusals, waits on a spinner, scrolls at the bottom
 MAX_REPEATS = 2  # consecutive actions already taken on the same screen earlier in the run: a cycle, or a click that does nothing
-EARLIER_SCREENS = 2  # screens before the last one that the answer may also be read from
+EARLIER_LINES = 600  # lines of text from the screens before the last one that the answer may also be read from
 
 # The outcomes that end with an answer, each in words the writer can pass on. A dry run took no
 # action and an abort is the user's own stop, so neither has anything to report.
@@ -138,18 +138,23 @@ def conclude(cfg: RunConfig, ctx: Context, state: RunState, log: Log) -> None:
     log(f"\nanswer ({verdict}, {time.perf_counter() - started:.1f}s):\n  {state.answer.text}")
 
 
-def earlier_screens(state: RunState, final: Signature, limit: int = EARLIER_SCREENS) -> list[dict]:
-    """The last few distinct screens the run passed through before the one it ended on, oldest first.
+def earlier_screens(state: RunState, final: Signature, budget: int = EARLIER_LINES) -> list[dict]:
+    """The distinct screens the run passed through before the one it ended on, oldest first.
 
     The goal may ask for something that was on the way (a price on the listing, not on the checkout),
-    and the run's own captures are the only place the answer may come from.
+    and the run's own captures are the only place the answer may come from. A screen seen twice
+    is sent once. The newest screens are kept whole and the oldest dropped once the line budget
+    is spent, since the writer reads all of it in one call.
     """
     out: list[Signature] = []
+    lines_left = budget
     for seen, _ in reversed(state.seen):
-        if len(out) == limit:
+        if same_screen(seen, final) or any(same_screen(seen, kept) for kept in out):
+            continue
+        lines_left -= len(seen[3])
+        if lines_left < 0:
             break
-        if not same_screen(seen, final) and not any(same_screen(seen, kept) for kept in out):
-            out.append(seen)
+        out.append(seen)
     return [{"app": app, "url": url, "text": [text for text, _ in lines]} for app, url, _, lines in reversed(out)]
 
 
