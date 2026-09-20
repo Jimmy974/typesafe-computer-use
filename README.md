@@ -90,8 +90,11 @@ does. So each step keeps a signature of the screen (the app, the page, the text 
 the loop stops after three actions in a row that left the screen as it was (a refused
 action, a wait on a page still loading, a scroll that has run out of page) or after two in a
 row that were already taken on the same screen earlier in the run (a click that does
-nothing, or a cycle through two pages). Two captures count as the same screen when nine
-tenths of their text matches, so a clock or a ticker does not hide a stall.
+nothing, or a cycle through two pages). Two captures count as the same screen when at most
+one line differs, and that one is one line in ten or fewer: a clock or a ticker does not
+hide a stall, and a two-line modal on a dense page is not mistaken for nothing happening.
+When more than that changes every step, a run that is getting nowhere runs to `--steps`:
+the rules err toward running on, never toward stopping a run that is making progress.
 
 **The answer.** When the loop stops itself, the writer reads the screen it stopped on
 and prints the result: the information the goal asked for, or where things stand and
@@ -218,7 +221,7 @@ on the app, and the node and time caps bind first on a big tree: Notes and Chrom
 | `press_enter`, `press_escape` | keyboard |
 | `go_back` | Cmd-[, the browser's Back, when the last click led somewhere unhelpful |
 | `scroll_down`, `scroll_up` | 10 lines, after parking the cursor over the frontmost window |
-| `wait` | screen still loading |
+| `wait` | screen still loading: 3 s, then the step's own delay, so three waits cover a slow page |
 | `done`, `none` | stop |
 
 ### Where free text comes from

@@ -15,6 +15,7 @@ from .models import Field, Item, Screen
 from .writer import compose_text, compose_url
 
 VERIFY_THRESHOLD = 0.5
+WAIT_SECONDS = 3.0  # what a wait adds to the settle delay every step already gets; three of them cover a slow page
 
 
 @dataclass(frozen=True)
@@ -156,6 +157,12 @@ def _scroll(lines: int, description: str):
     return handler
 
 
+def _wait(decision, screen, items, ctx) -> str:
+    """Give a loading page time. The step's own delay follows, so a wait is worth both."""
+    macos.sleep_watching(WAIT_SECONDS)
+    return "waited"
+
+
 _HANDLERS = {
     "use_browser": _use_browser,
     "type_email": _type_email,
@@ -165,5 +172,5 @@ _HANDLERS = {
     "go_back": _key("[", "went back", command=True),
     "scroll_down": _scroll(-10, "scrolled down"),
     "scroll_up": _scroll(10, "scrolled up"),
-    "wait": lambda decision, screen, items, ctx: "waited",
+    "wait": _wait,
 }

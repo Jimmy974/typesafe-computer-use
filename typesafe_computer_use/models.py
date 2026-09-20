@@ -38,7 +38,8 @@ class Abort(Exception):
 Signature = tuple[
     str, str | None, str | None, tuple[tuple[str, int], ...]
 ]  # app, URL, focused field, (text, row) in reading order
-SAME_SCREEN_OVERLAP = 0.9  # share of the lines two captures have in common for them to count as one screen
+LINES_PER_DIFFERENCE = 10  # a screen is the same when at most one line in ten differs...
+MAX_DIFFERING_LINES = 1  # ...and at most one line at all: a clock, a ticker, or an OCR slip
 ROW_PT = 20.0  # the row a line sits in, in screen points: coarse enough to survive OCR jitter, fine enough to see a scroll
 
 
@@ -58,15 +59,16 @@ def signature(screen: Screen, items: list[Item]) -> Signature:
 def same_screen(a: Signature, b: Signature) -> bool:
     """Whether two captures show the same screen, allowing for a clock, a ticker, or an OCR slip.
 
-    The lines must overlap by nine tenths, measured against the larger set so that a page that
-    gained a whole section counts as changed and one that lost a line counts as the same.
+    One line may differ, and only when it is one in ten or less. On a dense page a two-line modal
+    is a change; on a five-line page any change is one. Measured as lines that appeared or
+    vanished, whichever is more, so a page that gained a section counts as changed and one that
+    lost a line under the bar counts as the same.
     """
     if a[:3] != b[:3]:
         return False
     lines_a, lines_b = set(a[3]), set(b[3])
-    if not lines_a and not lines_b:
-        return True
-    return len(lines_a & lines_b) / max(len(lines_a), len(lines_b)) >= SAME_SCREEN_OVERLAP
+    differing = max(len(lines_a - lines_b), len(lines_b - lines_a))
+    return differing <= MAX_DIFFERING_LINES and differing * LINES_PER_DIFFERENCE <= max(len(lines_a), len(lines_b))
 
 
 @dataclass(frozen=True)

@@ -1,6 +1,6 @@
 from dataclasses import replace
 
-from typesafe_computer_use.models import SAME_SCREEN_OVERLAP, Field, same_screen, signature
+from typesafe_computer_use.models import LINES_PER_DIFFERENCE, Field, same_screen, signature
 from typesafe_computer_use.runner import MAX_REPEATS, RunState, earlier_screens, repeating, tried_here
 
 
@@ -34,7 +34,24 @@ def test_a_clock_or_a_ticker_does_not_make_a_new_screen():
     before = ("Google Chrome", None, None, texts(*lines, "12:00"))
     after = ("Google Chrome", None, None, texts(*lines, "12:01"))
     assert same_screen(before, after)
-    assert SAME_SCREEN_OVERLAP == 0.9
+    assert LINES_PER_DIFFERENCE == 10
+
+
+def test_a_small_modal_on_a_dense_page_is_a_new_screen():
+    lines = [f"Row {n}" for n in range(40)]
+    page = ("Google Chrome", None, None, texts(*lines))
+    with_modal = ("Google Chrome", None, None, texts(*lines, "Sign up for news", "Close"))
+    assert not same_screen(page, with_modal)  # two lines in forty-two is a change, however small the share
+
+
+def test_one_line_changing_on_a_short_page_is_a_new_screen():
+    assert not same_screen(
+        ("Notes", None, None, texts("Next", "Step 1 of 3")), ("Notes", None, None, texts("Next", "Step 2 of 3"))
+    )
+    assert not same_screen(
+        ("Notes", None, None, texts(*[f"L{n}" for n in range(5)])),
+        ("Notes", None, None, texts(*[f"L{n}" for n in range(4)], "L9")),
+    )
 
 
 def test_a_page_that_gained_a_section_is_a_new_screen():

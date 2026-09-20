@@ -190,3 +190,10 @@ def test_typing_uses_keystrokes_when_there_is_no_element(calls, monkeypatch):
 def test_the_field_record_leaves_the_element_out_so_a_run_can_be_written():
     record = field(ref=object(), value="hello").record()
     assert "ref" not in record and json.loads(json.dumps(record))["value"] == "hello"
+
+
+def test_a_wait_gives_the_page_time_before_the_step_delay(monkeypatch):
+    slept = []
+    monkeypatch.setattr(macos, "sleep_watching", slept.append)
+    assert actions._HANDLERS["wait"](None, None, [], None) == "waited"
+    assert slept == [actions.WAIT_SECONDS]
