@@ -40,6 +40,7 @@ OFFSCREEN_Y = -4200.0
 
 Step = tuple  # (kind, target) or (kind, target, confidence)
 Policy = Callable[[dict, dict], Step]
+Rows = list  # of str, or (text, role)
 
 
 def row_box(n: int) -> tuple[float, float, float, float]:
@@ -53,6 +54,8 @@ class Page:
     """One screen of the simulated computer, and what each action does to it.
 
     `items` are rows of text, or (text, role) for a control the app declares through accessibility.
+    A page whose rows change on their own -- a clock, a ticker -- passes a callable(world) instead,
+    which is asked again on every capture.
     `on` maps an action as the world names it ("click:Tickets", "enter", "type:hello", "open:<url>")
     to the next page's name, or to a callable(world) returning a name or None to stay. An action
     with no entry leaves the page alone, which is the "nothing happened" case the runner must cope
@@ -60,7 +63,7 @@ class Page:
     """
 
     name: str
-    items: list[str | tuple[str, str]] = dataclasses.field(default_factory=list)
+    items: Rows | Callable[[World], Rows] = dataclasses.field(default_factory=list)
     url: str | None = None  # browser pages have one; app pages do not
     app: str = "Google Chrome"
     field: str | None = None  # label of the text field focused on this page, if any
@@ -85,6 +88,7 @@ class World:
         self.mouse: list[tuple[float, float]] = []
         self.fake: FakeTypeSafe | None = None  # the classifier `drive` built, for fake.states
         self.loading = {p.name: p.loads_in for p in pages}
+        self.ticks = 0  # captures taken so far, so a page can show something that moves on its own
         self._actions: dict[int, str] = {}  # id(ref) -> the action pressing that element applies
         self._refs: dict[str, object] = {}  # action -> the element, so a ref stays the same object
         self._labels: dict[int, str] = {}  # id(field ref) -> the field's label
@@ -100,7 +104,8 @@ class World:
         """(text, role) per row of the current page. A page still loading shows one line."""
         if self.loading_now:
             return [(LOADING, "")]
-        return [(it, "") if isinstance(it, str) else it for it in self.page.items]
+        items = self.page.items(self) if callable(self.page.items) else self.page.items
+        return [(it, "") if isinstance(it, str) else it for it in items]
 
     def apply(self, action: str, label: str | None = None) -> None:
         """Receive one action: record it, then follow the current page's transition for it.
@@ -139,12 +144,16 @@ class World:
     # ----- the screen ----------------------------------------------------------------------
 
     def capture(self) -> Screen:
-        """What `perception.capture` would return for the page now showing."""
+        """What `perception.capture` would return for the page now showing.
+
+        Each capture is a tick, so a page whose rows are a callable can move between steps without
+        moving inside one: every other read of the screen in the same step sees the same rows.
+        """
         nodes = [
             AxNode(role="AXLink", label=lbl, x=0.0, y=OFFSCREEN_Y, w=120.0, h=32.0, pressable=True, ref=self._ref(f"press:{lbl}"))
             for lbl in self.page.offscreen
         ]
-        return Screen(
+        screen = Screen(
             image=Image.new("RGB", CAPTURE),
             scale=SCALE,
             app=self.page.app,
@@ -154,6 +163,8 @@ class World:
             window=None,
             offscreen=nodes,
         )
+        self.ticks += 1
+        return screen
 
     def perceive(self, screen: Screen) -> list[Item]:
         """The rows as items, filling `screen.ax_refs` for the ones the app declared."""
@@ -381,10 +392,11 @@ def drive(
     tmp_path=None,
     writer: FakeWriter | None = None,
     email: str | None = None,
+    noul: float = 0.95,
 ) -> RunState:
     """Run the real loop against the world until it stops itself. `world.fake` holds the classifier."""
     world.install(monkeypatch)
-    fake = FakeTypeSafe(policy)
+    fake = FakeTypeSafe(policy, noul)
     world.fake = fake
     monkeypatch.setattr(runner, "TypeSafeClient", lambda: fake)
     cfg = RunConfig(goal=goal, out=tmp_path / "run", act=True, steps=steps, delay=0)
