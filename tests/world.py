@@ -292,6 +292,7 @@ class FakeTypeSafe:
         self.policy = policy
         self.noul = noul
         self.states: list[dict] = []
+        self.asked: list[dict] = []  # the questions each decision was asked, so a test can read the criteria offered
         self.verify_states: list[dict] = []
         self.steps: list[Step] = []
 
@@ -306,6 +307,7 @@ class FakeTypeSafe:
             self.verify_states.append(state)
             return SimpleNamespace(answers={name: SimpleNamespace(noul=self.noul) for name in questions})
         self.states.append(state)
+        self.asked.append(questions)
         step = self.policy(state, questions)
         self.steps.append(step)
         kind, target = step[0], step[1]

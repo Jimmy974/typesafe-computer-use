@@ -528,3 +528,245 @@ def test_l20_a_dead_link_is_steered_around_with_what_was_already_tried(monkeypat
     assert world.fake.states[0]["already_tried_on_this_screen"] == []
     assert world.fake.states[1]["already_tried_on_this_screen"] == ["clicked 'Sponsors'"]
     assert world.fake.states[2]["already_tried_on_this_screen"] == []
+
+
+def test_l21_a_composite_task_runs_the_whole_pipeline(monkeypatch, tmp_path):
+    """Every seam in one run: the browser, a modal, a slow page, a scroll, a field, and a result."""
+
+    def searched(world: World) -> str | None:
+        return "results" if world.typed.get("Search") == "bruno mars" else None
+
+    listing = "https://shows.example.com/listing"
+    world = World(
+        [
+            Page(
+                name="finder",
+                items=["Documents", "Downloads"],
+                url=None,
+                app="Finder",
+                on={"open:https://shows.example.com/": "cookies"},
+            ),
+            Page(
+                name="cookies",
+                items=["Accept cookies", "Reject"],
+                url="https://shows.example.com/",
+                on={"escape": "listing"},
+            ),
+            Page(name="listing", items=["Event A", "Event B"], url=listing, loads_in=2, on={"scroll_down": "listing2"}),
+            Page(name="listing2", items=[("Search", "field"), "Event C"], url=listing, on={"click:Search": "search"}),
+            Page(
+                name="search",
+                items=["Search", "Popular tours"],
+                url="https://shows.example.com/search",
+                field="Search",
+                on={"enter": searched},
+            ),
+            Page(
+                name="results",
+                items=["First result", "Second result"],
+                url="https://shows.example.com/results",
+                on={"click:First result": "detail"},
+            ),
+            Page(name="detail", items=["Bruno Mars", "Buy tickets"], url="https://shows.example.com/detail"),
+        ]
+    )
+    policy = scripted(
+        ("use_browser", "other"),
+        ("press_escape", None),
+        ("wait", None),
+        ("wait", None),
+        ("scroll_down", None),
+        ("click_item", "Search"),
+        ("type_text", None),
+        ("press_enter", None),
+        ("click_item", "First result"),
+        ("done", None),
+    )
+
+    state = drive(
+        world,
+        policy,
+        goal="find the bruno mars show",
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        writer=FakeWriter(text="bruno mars", url="https://shows.example.com/"),
+    )
+
+    assert state.outcome == "done"
+    assert state.history[:6] == [
+        "opened https://shows.example.com/",
+        "pressed Escape",
+        "waited",
+        "waited",
+        "scrolled down",
+        "pressed 'Search' via accessibility",
+    ]
+    assert state.history[6] == "typed 'bruno mars' into 'Search' via accessibility (verified 0.95)"
+    assert state.history[7:] == ["pressed Return", "clicked 'First result'"]
+    assert world.page.name == "detail"
+    assert world.log == [
+        "open:https://shows.example.com/",
+        "escape",
+        "wait",
+        "wait",
+        "scroll_down",
+        "click:Search",
+        "type:bruno mars",
+        "enter",
+        "click:First result",
+    ]
+
+
+LINKS = [f"Link {letter}" for letter in "ABCDEFGHIJ"]
+
+
+def hub_policy(state: dict, questions: dict) -> tuple:
+    """Take the first link this screen has not been sent down before; back out of every dead end."""
+    texts = [it["text"] for it in state["screen_items_in_reading_order"]]
+    if "Buy tickets" in texts:
+        return ("done", None)
+    if "Nothing here" in texts:
+        return ("go_back", None)
+    tried = state["already_tried_on_this_screen"]
+    for text in texts:
+        if f"clicked {text!r}" not in tried:
+            return ("click_item", text)
+    return ("none", None)
+
+
+def test_l22_a_hub_of_dead_links_is_searched_beyond_the_history_window(monkeypatch, tmp_path):
+    dead = [
+        Page(
+            name=f"dead{letter}",
+            items=["Nothing here", f"Dead {letter}"],
+            url=f"https://example.com/{letter.lower()}",
+            on={"back": "hub"},
+        )
+        for letter in "ABCDEFGHI"
+    ]
+    hub = Page(
+        name="hub",
+        items=LINKS,
+        url="https://example.com/",
+        on={**{f"click:Link {letter}": f"dead{letter}" for letter in "ABCDEFGHI"}, "click:Link J": "target"},
+    )
+    world = World([hub, *dead, Page(name="target", items=["Buy tickets", "Terms"], url="https://example.com/j")])
+
+    state = drive(world, hub_policy, goal=GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path)
+
+    assert state.outcome == "done"
+    assert len(state.history) == 19  # nine dead links, nine ways back, and the tenth link
+    assert state.history[-1] == "clicked 'Link J'"
+    assert world.page.name == "target"
+    last_hub = world.fake.states[18]  # the hub as it looked the step Link J was clicked
+    assert len(last_hub["previous_actions"]) == 8
+    assert not any("Link A" in action for action in last_hub["previous_actions"])  # fallen out of the window
+    assert last_hub["already_tried_on_this_screen"] == [f"clicked 'Link {letter}'" for letter in "ABCDEFGHI"]
+
+
+def modal_policy(state: dict, questions: dict) -> tuple:
+    """Escape a modal once; if the screen is still there, the modal wants its own button pressed."""
+    texts = [it["text"] for it in state["screen_items_in_reading_order"]]
+    if "Sign up for news" in texts:
+        if "pressed Escape" in state["already_tried_on_this_screen"]:
+            return ("click_item", "Close")
+        return ("press_escape", None)
+    if "Order summary" in texts:
+        return ("done", None)
+    return ("click_item", "Buy" if "Buy" in texts else "Tickets")
+
+
+def test_l23_a_modal_escape_cannot_close_is_closed_by_its_button(monkeypatch, tmp_path):
+    world = World(
+        [
+            Page(name="home", items=["Home", "Tickets"], url="https://example.com/", on={"click:Tickets": "modal"}),
+            Page(
+                name="modal",
+                items=["Sign up for news", "Close"],
+                url="https://example.com/tickets",
+                on={"click:Close": "tickets"},  # escape does nothing here
+            ),
+            Page(name="tickets", items=["Buy", "Terms"], url="https://example.com/tickets", on={"click:Buy": "checkout"}),
+            Page(name="checkout", items=["Order summary", "Pay now"], url="https://example.com/checkout"),
+        ]
+    )
+
+    state = drive(world, modal_policy, goal=GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path)
+
+    assert state.outcome == "done"
+    assert state.history == ["clicked 'Tickets'", "pressed Escape", "clicked 'Close'", "clicked 'Buy'"]
+    assert world.page.name == "checkout"
+    assert world.log == ["click:Tickets", "escape", "click:Close", "click:Buy"]
+
+
+def test_l24_type_email_fills_the_focused_email_field(monkeypatch, tmp_path):
+    world = World(
+        [
+            Page(
+                name="login",
+                items=["Email", "Sign in"],
+                url="https://example.com/login",
+                field="Email",
+                on={"click:Sign in": "account"},
+            ),
+            Page(name="account", items=["Your account"], url="https://example.com/account"),
+        ]
+    )
+    policy = scripted(("type_email", None), ("done", None))
+
+    state = drive(world, policy, goal="sign in", monkeypatch=monkeypatch, tmp_path=tmp_path, email="user@example.com")
+
+    assert state.outcome == "done"
+    assert state.history == ["typed email via accessibility"]
+    assert world.typed["Email"] == "user@example.com"
+    assert world.log == ["type:user@example.com"]
+    assert "type_email" in world.fake.asked[0]["kind"].criteria  # the action is only offered when an email is known
+
+
+def test_l25_a_stalled_run_still_answers_from_the_last_screen(monkeypatch, tmp_path):
+    world = World(
+        [
+            Page(name="a", items=["Next", "Page 1"], url="https://example.com/a", on={"click:Next": "b"}),
+            Page(name="b", items=["Back", "Page 2"], url="https://example.com/b", on={"click:Back": "a"}),
+        ]
+    )
+
+    state = drive(world, first_item_policy, goal=GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path)
+
+    assert state.outcome == "stalled"
+    assert state.answer is not None
+    assert state.answer.text == " ".join(world.page.items)  # the answer reads the screen the run ended on
+    assert len(world.log) == len(state.history)  # re-reading the screen costs no action
+
+
+def test_l26_a_refused_action_then_a_good_one_does_not_stall(monkeypatch, tmp_path):
+    world = World(
+        [
+            Page(name="home", items=["Home", "Tickets"], url="https://example.com/", on={"click:Tickets": "tickets"}),
+            Page(name="tickets", items=["Buy", "Terms"], url="https://example.com/tickets"),
+        ]
+    )
+    policy = scripted(("type_text", None), ("click_item", "Tickets"), ("done", None))
+
+    state = drive(world, policy, goal=GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path)
+
+    assert state.outcome == "done"
+    assert state.history == ["type_text refused: no text field is focused", "clicked 'Tickets'"]
+    assert world.page.name == "tickets"
+    assert world.log == ["click:Tickets"]  # the refusal never reached the machine
+
+
+def test_l27_scrolling_past_the_end_stops_within_the_idle_budget(monkeypatch, tmp_path):
+    listing = "https://example.com/list"
+    world = World(
+        [
+            Page(name="list", items=["Event A", "Event B"], url=listing, on={"scroll_down": "list2"}),
+            Page(name="list2", items=["Event C", "Event D"], url=listing),  # the end: scrolling does nothing
+        ]
+    )
+
+    state = drive(world, always_scroll_policy, goal=GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path)
+
+    assert state.outcome == "stalled"
+    assert state.history == ["scrolled down"] * 4  # one that moved, then three at the bottom
+    assert world.page.name == "list2"
