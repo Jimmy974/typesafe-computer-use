@@ -101,11 +101,12 @@ def test_a_wait_is_neither_a_repeat_nor_something_the_classifier_is_told_it_trie
     state = RunState(last=loading)
     lines: list[str] = []
     for _ in range(MAX_REPEATS + 1):
-        assert not repeating(state, "waited", lines.append)
-    assert state.seen == [] and tried_here(state) == [] and lines == []
-    assert not repeating(state, "clicked 'Buy'", lines.append)  # the first time on this screen
-    assert not repeating(state, "clicked 'Buy'", lines.append)  # one repeat is a warning shot
-    assert repeating(state, "clicked 'Buy'", lines.append) and state.outcome == "stalled"
+        assert not repeating(state, "waited", True, lines.append)
+    assert state.seen == [(loading, None)] * (MAX_REPEATS + 1)  # the screen is on record, with no action to steer around
+    assert tried_here(state) == [] and lines == []
+    assert not repeating(state, "clicked 'Buy'", False, lines.append)  # the first time on this screen
+    assert not repeating(state, "clicked 'Buy'", False, lines.append)  # one repeat is a warning shot
+    assert repeating(state, "clicked 'Buy'", False, lines.append) and state.outcome == "stalled"
     assert tried_here(state) == ["clicked 'Buy'"] * MAX_REPEATS + ["clicked 'Buy'"]
 
 

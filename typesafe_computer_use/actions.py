@@ -81,7 +81,8 @@ def fill_field(field: Field, text: str) -> str:
     Setting the value is one message instead of one per character, and it cannot be stolen by a
     page that moves the focus mid-word. It is also widely ignored, so the value is read back and
     only a field that really holds the text counts. Keystrokes land after whatever the field
-    already holds, so a field with a value is emptied first. Returns which path ran, for the history.
+    holds, including a value the element took but did not read back, so the field is always
+    emptied first. Returns which path ran, for the history.
     """
     ref = field.ref
     if ref is not None:
@@ -90,8 +91,7 @@ def fill_field(field: Field, text: str) -> str:
             back = macos.ax_value(ref)
             if back is not None and back.endswith(text):
                 return "via accessibility"
-    if field.value:
-        macos.clear_field()
+    macos.clear_field()
     macos.type_text(text)
     return "via keystrokes"
 

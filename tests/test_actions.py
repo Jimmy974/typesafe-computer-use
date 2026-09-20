@@ -16,6 +16,7 @@ def calls(monkeypatch):
     monkeypatch.setattr(macos, "click_at", lambda point: log.append(("click", point)))
     monkeypatch.setattr(macos, "type_text", lambda text: log.append(("type", text)))
     monkeypatch.setattr(macos, "ax_focus", lambda ref: log.append(("focus", ref)) or True)
+    monkeypatch.setattr(macos, "clear_field", lambda: log.append(("clear",)))
     return log
 
 
@@ -169,9 +170,9 @@ def test_typing_accepts_a_read_back_that_ends_with_the_text(calls, monkeypatch):
 
 def test_typing_falls_back_to_keystrokes_when_the_value_does_not_stick(calls, monkeypatch):
     monkeypatch.setattr(macos, "ax_set_value", lambda ref, text: True)
-    monkeypatch.setattr(macos, "ax_value", lambda ref: "")
+    monkeypatch.setattr(macos, "ax_value", lambda ref: "user@exam")  # the element took part of it and reads back the rest
     assert fill_field(field(ref=object()), "user@example.com") == "via keystrokes"
-    assert calls[-1] == ("type", "user@example.com")
+    assert calls[-2:] == [("clear",), ("type", "user@example.com")]  # emptied first, whatever the capture said the value was
 
 
 def test_typing_falls_back_to_keystrokes_when_the_element_refuses(calls, monkeypatch):
@@ -184,7 +185,7 @@ def test_typing_falls_back_to_keystrokes_when_the_element_refuses(calls, monkeyp
 def test_typing_uses_keystrokes_when_there_is_no_element(calls, monkeypatch):
     monkeypatch.setattr(macos, "ax_set_value", lambda ref, text: pytest.fail("no element to write to"))
     assert fill_field(field(), "hello") == "via keystrokes"
-    assert calls == [("type", "hello")]
+    assert calls == [("clear",), ("type", "hello")]
 
 
 def test_the_field_record_leaves_the_element_out_so_a_run_can_be_written():

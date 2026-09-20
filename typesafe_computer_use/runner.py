@@ -61,7 +61,9 @@ class RunState:
     idle: int = 0  # actions in a row that changed nothing on screen
     repeats: int = 0  # actions in a row already taken on the same screen
     last: Signature | None = None  # the screen the last action was taken on
-    seen: list[tuple[Signature, str]] = field(default_factory=list)  # every (screen, action) pair so far
+    seen: list[tuple[Signature, str | None]] = field(
+        default_factory=list
+    )  # every screen acted on, with the action; None for a wait
     outcome: str = "crashed"  # every way out of the loop names its own; only an exception leaves this
     ocr_cache: OcrCache = field(default_factory=OcrCache)  # carries one step's OCR into the next
     view: tuple[Screen, list[Item]] | None = None  # the latest capture, until an action makes it stale
@@ -242,7 +244,7 @@ def resolve(
     state.view = None
     state.history.append(what)
     log(f"  did: {what}")
-    return not repeating(state, what, log)
+    return not repeating(state, what, decision.kind.choice == "wait", log)
 
 
 def screen_moved(state: RunState, screen: Screen, items: list[Item], log: Log) -> bool:
@@ -265,18 +267,20 @@ def screen_moved(state: RunState, screen: Screen, items: list[Item], log: Log) -
 
 def tried_here(state: RunState) -> list[str]:
     """The actions already taken on the screen now showing, oldest first, for the classifier to steer around."""
-    return [what for seen, what in state.seen if state.last is not None and same_screen(seen, state.last)]
+    return [what for seen, what in state.seen if what is not None and state.last is not None and same_screen(seen, state.last)]
 
 
-def repeating(state: RunState, what: str, log: Log) -> bool:
+def repeating(state: RunState, what: str, waiting: bool, log: Log) -> bool:
     """Count the actions already taken on the same screen earlier, and stop once too many run in a row.
 
     The same action on the same screen led somewhere once, and this is where it led: back here.
-    That is a cycle through two pages as much as a button that does nothing. A wait is left out
-    altogether, since waiting is repeating by design and the classifier must stay free to wait
-    again; the idle count bounds it instead.
+    That is a cycle through two pages as much as a button that does nothing. A wait is recorded
+    with no action, so the screen it was taken on still reaches the answer, but it is never a
+    repeat and never listed as tried: waiting is repeating by design, and the classifier must
+    stay free to wait again. The idle count bounds it instead.
     """
-    if what == "waited":
+    if waiting:
+        state.seen.append((state.last, None))
         return False
     state.repeats = state.repeats + 1 if what in tried_here(state) else 0
     state.seen.append((state.last, what))
