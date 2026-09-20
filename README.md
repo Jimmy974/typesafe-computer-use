@@ -129,7 +129,9 @@ dates.py      ─► "dated 2026-10-13 (in 27 days)" on any block containing a d
 Items carry where they came from: `ocr` for a text block, `ax` for a control the app
 declared, `ax+ocr` when both found the same thing. An `ax` item reads as
 `button 'Share' (top-right)` in the criteria, so the classifier can tell a real control
-from a line of text.
+from a line of text. A label that appears more than once carries its row as well:
+`'Buy' (middle-right; in the row of 'Coldplay', 'Oct 2')`, since the label says nothing
+about which and the layout does.
 
 Splitting the decision into three questions keeps screen noise out of the action
 choice. Every stall found while building this came from two options that meant the
@@ -303,7 +305,8 @@ as callables, so only those three bindings change. Nothing else knows the platfo
 
 - OCR only sees text, and the accessibility tree only covers apps that publish one.
   In a terminal, a canvas, or Spotify, an icon-only button reaches neither source.
-- Two identical labels get only a coarse region hint and split the vote.
+- Two identical labels in one row, or in no row at all, get only a coarse region hint and
+  split the vote. Ones in different rows are told apart by the text beside them.
 - Only the main display is captured.
 - Using the machine during an `--act` run fights it for focus and the cursor.
 - The site catalog is small on purpose; the writer covers the rest.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 
 from typesafe_sdk import Choice, ChoiceAnswer, Noul, TypeSafeClient
@@ -59,13 +60,38 @@ def kind_criteria(browser: str, email: str | None, offscreen: bool = False) -> d
     return {**clicks, **fixed_actions(browser, email)}
 
 
+ROW_MATES = 3  # how many neighbours name a duplicated item's row
+
+
+def row_mates(items: list[Item], limit: int = ROW_MATES) -> dict[int, list[str]]:
+    """Item index -> the texts sharing its row, left to right, for every item whose text another item repeats.
+
+    Three rows of events each end in a 'Buy'. The label says nothing about which; the row does,
+    and the row is a fact the layout holds, so the code reads it and hands it over.
+    """
+    counts = Counter(it.text for it in items)
+    out: dict[int, list[str]] = {}
+    for it in items:
+        if counts[it.text] < 2:
+            continue
+        cy, half = it.center[1], max(1.0, it.y2 - it.y1) / 2
+        mates = sorted((o for o in items if o is not it and abs(o.center[1] - cy) < half), key=lambda o: o.x1)
+        if mates:
+            out[it.index] = [o.text for o in mates[:limit]]
+    return out
+
+
 def item_criteria(screen: Screen, items: list[Item]) -> dict[str, str]:
-    """Each item as one line. A role prefix marks the ones the app itself declared."""
+    """Each item as one line. A role prefix marks the ones the app itself declared, and a
+    duplicated label carries its row."""
     hints = date_hints(items, screen)
+    mates = row_mates(items)
     return {
         str(it.index): (
             f"{it.role + ' ' if it.from_ax and it.role else ''}{it.text!r} "
-            f"({screen.region(it)}{'; ' + hints[it.index] if it.index in hints else ''})"
+            f"({screen.region(it)}"
+            f"{'; ' + hints[it.index] if it.index in hints else ''}"
+            f"{'; in the row of ' + ', '.join(repr(t) for t in mates[it.index]) if it.index in mates else ''})"
         )
         for it in items
     }
@@ -94,6 +120,7 @@ def base_state(goal: str, screen: Screen, items: list[Item], history: list[str],
     """The facts the classifier reads. `tried` lists the actions already taken on this same screen
     earlier in the run, each of which led back here: a fact the code knows and the model cannot."""
     hints = date_hints(items, screen)
+    mates = row_mates(items)
     return {
         "goal": goal,
         "now": now_context(),
@@ -109,6 +136,7 @@ def base_state(goal: str, screen: Screen, items: list[Item], history: list[str],
                 "where": screen.region(it),
                 **({"role": it.role} if it.role else {}),
                 **({"when": hints[it.index]} if it.index in hints else {}),
+                **({"beside": mates[it.index]} if it.index in mates else {}),
             }
             for it in items
         ],

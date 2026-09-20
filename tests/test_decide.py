@@ -2,7 +2,15 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 from typesafe_computer_use.config import SITES
-from typesafe_computer_use.decide import Decision, base_state, item_criteria, kind_criteria, offscreen_criteria, site_criteria
+from typesafe_computer_use.decide import (
+    Decision,
+    base_state,
+    item_criteria,
+    kind_criteria,
+    offscreen_criteria,
+    row_mates,
+    site_criteria,
+)
 from typesafe_computer_use.models import AxNode
 
 
@@ -93,3 +101,22 @@ def test_item_criteria_and_state_carry_region_and_dates(screen, make_item):
     assert state["previous_actions"] == ["opened https://example.com/"]
     assert state["screen_items_in_reading_order"][1]["when"].startswith("near a line dated")
     assert "today" in state["now"]
+
+
+def test_a_duplicated_label_names_its_row_and_a_unique_one_does_not(screen, make_item):
+    items = [
+        make_item(0, "Bruno Mars", x1=100, x2=300),
+        make_item(1, "Sep 25", x1=320, x2=400),
+        make_item(2, "Buy", x1=420, x2=480),
+        make_item(3, "Coldplay", x1=100, x2=300, y1=200, y2=230),
+        make_item(4, "Oct 2", x1=320, x2=400, y1=200, y2=230),
+        make_item(5, "Buy", x1=420, x2=480, y1=200, y2=230),
+        make_item(6, "Terms", y1=300, y2=330),
+    ]
+    assert row_mates(items) == {2: ["Bruno Mars", "Sep 25"], 5: ["Coldplay", "Oct 2"]}
+    crit = item_criteria(screen, items)
+    assert crit["5"].endswith("; in the row of 'Coldplay', 'Oct 2')")
+    assert "row" not in crit["3"] and "row" not in crit["6"]
+    state = base_state("buy a ticket to Coldplay", screen, items, [])
+    rows = state["screen_items_in_reading_order"]
+    assert rows[5]["beside"] == ["Coldplay", "Oct 2"] and "beside" not in rows[3]
