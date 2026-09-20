@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from world import FakeWriter, Page, World, drive, scripted
 
 GOAL = "buy a ticket to the next show"
@@ -1349,3 +1350,81 @@ def test_l39_the_wrong_buy_is_undone_and_the_right_one_is_not_marked_as_tried(mo
     assert world.log == ["click:Buy@0", "back", "click:Buy@1"]
     assert state.repeats == 0  # the second Buy is a different line, so nothing reads as a repeat
     assert world.fake.states[2]["already_tried_on_this_screen"] == ["clicked 'Buy' beside 'Bruno Mars', 'Sep 25'"]
+
+
+def note_policy(state: dict, questions: dict) -> tuple:
+    """Make notes until three of them have been made."""
+    made = sum(1 for action in state["previous_actions"] if "New note" in action)
+    return ("done", None) if made >= 3 else ("click_item", "New note")
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="a repeated action on a screen whose visible text does not change reads as a cycle; nothing on the capture says the third note exists",
+)
+def test_l40_a_legitimate_repeat_that_leaves_the_visible_text_unchanged_is_taken_for_a_stall(monkeypatch, tmp_path):
+    """Three notes is one action done three times, and the app says so nowhere the capture can see.
+
+    A known limit of a signature read off the screen alone: the stop rules cannot tell a button that
+    does nothing from a button that does something invisible. The scenario is kept as the behaviour
+    that is wanted, so any fix -- a counted action, a window title, an accessibility value -- is
+    measured against it rather than argued about.
+    """
+
+    def made_a_note(world: World) -> None:
+        world.notes += 1  # the note exists, and the screen looks exactly as it did
+        return None
+
+    world = World(
+        [Page(name="notes", items=["Notes", ("New note", "button")], url=None, app="Notes", on={"click:New note": made_a_note})]
+    )
+    world.notes = 0
+
+    state = drive(world, note_policy, goal="create three new notes", monkeypatch=monkeypatch, tmp_path=tmp_path)
+
+    assert state.outcome == "done"
+    assert state.history == ["pressed 'New note' via accessibility"] * 3
+    assert world.notes == 3
+
+
+def test_l41_a_single_page_search_changes_results_not_the_url(monkeypatch, tmp_path):
+    """One URL for the whole app: only the text on screen says the search ran."""
+
+    def searched(world: World) -> str | None:
+        return "results" if world.typed.get("Search") == "bruno mars" else None
+
+    app = "https://example.com/app"
+    world = World(
+        [
+            Page(name="app", items=["Search", "Recent"], url=app, field="Search", on={"enter": searched}),
+            Page(
+                name="results",
+                items=["Search", "Results", "Bruno Mars - Sep 25", "Buy"],
+                url=app,
+                field="Search",
+                on={"click:Buy": "checkout"},
+            ),
+            Page(name="checkout", items=["Order summary"], url=app),
+        ]
+    )
+    policy = scripted(("type_text", None), ("press_enter", None), ("click_item", "Buy"), ("done", None))
+
+    state = drive(
+        world,
+        policy,
+        goal="search for the bruno mars tour and buy a ticket",
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        writer=FakeWriter(text="bruno mars"),
+    )
+
+    assert state.outcome == "done"
+    assert world.page.name == "checkout"
+    assert state.history == [
+        "typed 'bruno mars' into 'Search' via accessibility (verified 0.95)",
+        "pressed Return",
+        "clicked 'Buy'",
+    ]
+    assert world.log == ["type:bruno mars", "enter", "click:Buy"]
+    last = json.loads((tmp_path / "run" / "step-003-answers.json").read_text())
+    assert (last["idle_actions"], last["repeated_actions"]) == (0, 0)  # a page that only changed its text still moved
