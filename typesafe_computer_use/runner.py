@@ -265,11 +265,13 @@ def repeating(state: RunState, what: str, log: Log) -> bool:
     """Count the actions already taken on the same screen earlier, and stop once too many run in a row.
 
     The same action on the same screen led somewhere once, and this is where it led: back here.
-    That is a cycle through two pages as much as a button that does nothing. A wait is exempt,
-    since waiting is repeating by design; the idle count bounds it instead.
+    That is a cycle through two pages as much as a button that does nothing. A wait is left out
+    altogether, since waiting is repeating by design and the classifier must stay free to wait
+    again; the idle count bounds it instead.
     """
-    if what != "waited":
-        state.repeats = state.repeats + 1 if what in tried_here(state) else 0
+    if what == "waited":
+        return False
+    state.repeats = state.repeats + 1 if what in tried_here(state) else 0
     state.seen.append((state.last, what))
     if state.repeats >= MAX_REPEATS:
         log(f"  {MAX_REPEATS} actions in a row already taken on the same screen; stopping")

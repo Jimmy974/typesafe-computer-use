@@ -1,7 +1,7 @@
 from dataclasses import replace
 
 from typesafe_computer_use.models import SAME_SCREEN_OVERLAP, Field, same_screen, signature
-from typesafe_computer_use.runner import RunState, earlier_screens, tried_here
+from typesafe_computer_use.runner import MAX_REPEATS, RunState, earlier_screens, repeating, tried_here
 
 
 def texts(*words: str):
@@ -75,3 +75,16 @@ def test_earlier_screens_are_the_distinct_ones_before_the_last_oldest_first():
     ]
     assert earlier_screens(state, tickets) == [{"app": "Google Chrome", "url": "https://a/", "text": ["Home", "Tickets"]}]
     assert earlier_screens(RunState(), checkout) == []
+
+
+def test_a_wait_is_neither_a_repeat_nor_something_the_classifier_is_told_it_tried():
+    loading = ("Google Chrome", "https://a/tickets", None, texts("Loading..."))
+    state = RunState(last=loading)
+    lines: list[str] = []
+    for _ in range(MAX_REPEATS + 1):
+        assert not repeating(state, "waited", lines.append)
+    assert state.seen == [] and tried_here(state) == [] and lines == []
+    assert not repeating(state, "clicked 'Buy'", lines.append)  # the first time on this screen
+    assert not repeating(state, "clicked 'Buy'", lines.append)  # one repeat is a warning shot
+    assert repeating(state, "clicked 'Buy'", lines.append) and state.outcome == "stalled"
+    assert tried_here(state) == ["clicked 'Buy'"] * MAX_REPEATS + ["clicked 'Buy'"]
