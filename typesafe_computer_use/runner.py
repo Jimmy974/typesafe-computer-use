@@ -218,7 +218,7 @@ def resolve(
     state.view = None
     state.history.append(what)
     log(f"  did: {what}")
-    return not repeating(state, signature(screen, items), what, log)
+    return not repeating(state, what, log)
 
 
 def screen_moved(state: RunState, screen: Screen, items: list[Item], log: Log) -> bool:
@@ -244,7 +244,7 @@ def tried_here(state: RunState) -> list[str]:
     return [what for seen, what in state.seen if state.last is not None and same_screen(seen, state.last)]
 
 
-def repeating(state: RunState, now: Signature, what: str, log: Log) -> bool:
+def repeating(state: RunState, what: str, log: Log) -> bool:
     """Count the actions already taken on the same screen earlier, and stop once too many run in a row.
 
     The same action on the same screen led somewhere once, and this is where it led: back here.
@@ -252,8 +252,8 @@ def repeating(state: RunState, now: Signature, what: str, log: Log) -> bool:
     since waiting is repeating by design; the idle count bounds it instead.
     """
     if what != "waited":
-        state.repeats = state.repeats + 1 if any(a == what and same_screen(s, now) for s, a in state.seen) else 0
-    state.seen.append((now, what))
+        state.repeats = state.repeats + 1 if what in tried_here(state) else 0
+    state.seen.append((state.last, what))
     if state.repeats >= MAX_REPEATS:
         log(f"  {MAX_REPEATS} actions in a row already taken on the same screen; stopping")
         state.outcome = "stalled"
