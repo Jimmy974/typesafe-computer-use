@@ -69,6 +69,7 @@ class Page:
     field: str | None = None  # label of the text field focused on this page, if any
     offscreen: tuple[str, ...] = ()  # labels the app exposes without showing
     loads_in: int = 0  # steps of "wait" before the items appear
+    no_ax_value: bool = False  # the field refuses to have its value set, so text has to be typed in
     on: dict[str, str | Callable[[World], str | None]] = dataclasses.field(default_factory=dict)
 
 
@@ -78,6 +79,9 @@ class World:
     `log` holds the world's own action names in order. Mouse clicks also land in `mouse` as the raw
     point, because a press through accessibility and a click on the pixel under the item both read
     as "click:<text>" here, and a scenario needs to tell the two apart.
+
+    `typed` is a plain dict a scenario may seed before the run, for a field that already holds
+    something when the loop first sees it.
     """
 
     def __init__(self, pages: list[Page], start: str | None = None):
@@ -107,7 +111,7 @@ class World:
         items = self.page.items(self) if callable(self.page.items) else self.page.items
         return [(it, "") if isinstance(it, str) else it for it in items]
 
-    def apply(self, action: str, label: str | None = None) -> None:
+    def apply(self, action: str, label: str | None = None, append: bool = False) -> None:
         """Receive one action: record it, then follow the current page's transition for it.
 
         A page that is still loading answers nothing but `wait`: the tick is spent, the action is
@@ -119,7 +123,10 @@ class World:
                 self.loading[self.page.name] -= 1
             return
         if action.startswith("type:"):
-            self.typed[label or self.page.field or ""] = action[len("type:") :]
+            key = label or self.page.field or ""
+            text = action[len("type:") :]
+            # Keystrokes land after whatever the field already holds; setting a value replaces it.
+            self.typed[key] = self.typed.get(key, "") + text if append else text
         nxt = self.page.on.get(action)
         if callable(nxt):
             nxt = nxt(self)
@@ -227,9 +234,12 @@ class World:
         self.apply("scroll_down" if lines < 0 else "scroll_up")
 
     def type_text(self, text: str) -> None:
-        self.apply(f"type:{text}")
+        self.apply(f"type:{text}", append=True)
 
     def ax_set_value(self, ref: object, text: str) -> bool:
+        """Set the field's value, unless the page is one of those that quietly refuse to take one."""
+        if self.page.no_ax_value:
+            return False
         self.apply(f"type:{text}", label=self._labels.get(id(ref)))
         return True
 
@@ -361,7 +371,8 @@ class FakeWriter:
 
     The three writer calls are told apart by their schemas, exactly as `writer.py` builds them:
     a field fill, a proposed URL, and the final answer. The answer is the text of the screen the
-    run stopped on, so a scenario can assert the run ended on the right page through the answer.
+    run stopped on, plus the text of any earlier screens the packet carries, so a scenario can
+    assert through the answer both where the run ended and what it read on the way.
     """
 
     def __init__(self, text: str = "", url: str = ""):
@@ -379,7 +390,8 @@ class FakeWriter:
         elif asked == {"ok", "url", "reason"}:
             reply = {"ok": bool(self.url), "url": self.url, "reason": "the goal names the site"}
         elif asked == {"achieved", "answer"}:
-            reply = {"achieved": True, "answer": " ".join(packet["screen_text_in_reading_order"])}
+            earlier = [text for screen in packet.get("earlier_screens", []) for text in screen["text"]]
+            reply = {"achieved": True, "answer": " ".join(packet["screen_text_in_reading_order"] + earlier)}
         else:
             raise AssertionError(f"the writer was asked for {sorted(asked)}")
         return SimpleNamespace(content=[SimpleNamespace(type="text", text=json.dumps(reply))])

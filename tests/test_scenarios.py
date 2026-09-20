@@ -8,6 +8,8 @@ written and marked xfail with the reason, never weakened until it passes.
 
 from __future__ import annotations
 
+import json
+
 from world import FakeWriter, Page, World, drive, scripted
 
 GOAL = "buy a ticket to the next show"
@@ -735,7 +737,8 @@ def test_l25_a_stalled_run_still_answers_from_the_last_screen(monkeypatch, tmp_p
 
     assert state.outcome == "stalled"
     assert state.answer is not None
-    assert state.answer.text == " ".join(world.page.items)  # the answer reads the screen the run ended on
+    # The answer leads with the screen the run ended on; what follows is the screens seen before it.
+    assert state.answer.text.startswith(" ".join(world.page.items))
     assert len(world.log) == len(state.history)  # re-reading the screen costs no action
 
 
@@ -770,3 +773,155 @@ def test_l27_scrolling_past_the_end_stops_within_the_idle_budget(monkeypatch, tm
     assert state.outcome == "stalled"
     assert state.history == ["scrolled down"] * 4  # one that moved, then three at the bottom
     assert world.page.name == "list2"
+
+
+def answer_packet(writer: FakeWriter) -> dict:
+    """The packet of the writer's last call: the one that composed the answer."""
+    return json.loads(writer.requests[-1]["messages"][0]["content"][-1]["text"])
+
+
+def test_l28_the_answer_can_use_a_screen_seen_on_the_way(monkeypatch, tmp_path):
+    """The price was two screens back. The run ended on checkout, and the answer still has to carry it."""
+    world = World(
+        [
+            Page(name="home", items=["Home", "Tickets"], url="https://example.com/", on={"click:Tickets": "tickets"}),
+            Page(
+                name="tickets",
+                items=["Standard $45", "VIP $120", "Buy"],
+                url="https://example.com/tickets",
+                on={"click:Buy": "checkout"},
+            ),
+            Page(name="checkout", items=["Order summary", "Pay now"], url="https://example.com/checkout"),
+        ]
+    )
+    policy = scripted(("click_item", "Tickets"), ("click_item", "Buy"), ("done", None))
+    writer = FakeWriter()
+
+    state = drive(
+        world,
+        policy,
+        goal="find the ticket price and go to checkout",
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        writer=writer,
+    )
+
+    assert state.outcome == "done"
+    assert world.page.name == "checkout"
+    assert state.answer is not None and "$45" in state.answer.text
+    assert answer_packet(writer)["earlier_screens"][-1]["url"] == "https://example.com/tickets"
+
+
+def test_l29_keystrokes_replace_what_a_field_already_holds(monkeypatch, tmp_path):
+    def searched(world: World) -> str | None:
+        """Only the exact query reaches the results: a field typed on top of its old value does not."""
+        return "results" if world.typed.get("Search") == "bruno mars tour" else None
+
+    world = World(
+        [
+            Page(
+                name="search",
+                items=["Search", "Popular tours"],
+                url="https://example.com/",
+                field="Search",
+                no_ax_value=True,  # this field refuses the value path, so the keystrokes run
+                on={"enter": searched},
+            ),
+            Page(name="results", items=["First result", "Second result"], url="https://example.com/results"),
+        ]
+    )
+    world.typed["Search"] = "old query"  # the field is not empty when the loop first sees it
+    policy = scripted(("type_text", None), ("press_enter", None), ("done", None))
+
+    state = drive(
+        world,
+        policy,
+        goal="search for the bruno mars tour",
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        writer=FakeWriter(text="bruno mars tour"),
+    )
+
+    assert state.outcome == "done"
+    assert "via keystrokes" in state.history[0]
+    assert world.typed["Search"] == "bruno mars tour"
+    assert world.log.index("clear_field") < world.log.index("type:bruno mars tour")
+    assert world.page.name == "results"
+
+
+def test_l30_focus_stolen_by_another_app_is_taken_back_with_use_browser(monkeypatch, tmp_path):
+    world = World(
+        [
+            Page(name="tickets", items=["Buy", "Terms"], url="https://example.com/tickets", on={"click:Buy": "finder"}),
+            Page(name="finder", items=["Downloads", "receipt.pdf"], url=None, app="Finder", on={"activate": "checkout"}),
+            Page(name="checkout", items=["Order summary", "Pay now"], url="https://example.com/checkout"),
+        ]
+    )
+    policy = scripted(("click_item", "Buy"), ("use_browser", "none"), ("done", None))
+
+    state = drive(world, policy, goal=GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path)
+
+    assert state.outcome == "done"
+    assert state.history == ["clicked 'Buy'", "activated Google Chrome"]
+    assert world.page.name == "checkout"
+    assert world.log == ["click:Buy", "activate"]
+
+
+def test_l31_an_unusable_writer_url_is_refused_and_the_catalog_is_used_instead(monkeypatch, tmp_path):
+    world = World(
+        [
+            Page(
+                name="finder",
+                items=["Documents", "Downloads"],
+                url=None,
+                app="Finder",
+                on={"open:https://github.com/": "github"},
+            ),
+            Page(name="github", items=["Sign in", "Pull requests"], url="https://github.com/"),
+        ]
+    )
+    policy = scripted(("use_browser", "other"), ("use_browser", "github"), ("done", None))
+
+    state = drive(
+        world,
+        policy,
+        goal="open the issue tracker",
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        writer=FakeWriter(url="http://insecure.example.com/"),  # not https: the writer's proposal is dropped
+    )
+
+    assert state.outcome == "done"
+    assert state.history[0] == "use_browser refused: the writer proposed no usable URL for this goal"
+    assert state.history[1] == "opened https://github.com/"
+    assert world.page.name == "github"
+    assert world.log == ["open:https://github.com/"]
+    assert not any("insecure.example.com" in action for action in world.log)
+
+
+def growing_feed(world: World) -> list[str]:
+    """A feed that gains a post every time it is read."""
+    return [f"Post {n}" for n in range(1, world.ticks + 4)] + ["Load more"]
+
+
+def test_l32_a_feed_that_grows_every_step_is_not_mistaken_for_a_stall(monkeypatch, tmp_path):
+    world = World([Page(name="feed", items=growing_feed, url="https://example.com/feed")])
+    policy = scripted(*[("click_item", "Load more")] * 5)
+
+    state = drive(world, policy, goal=GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path)
+
+    assert state.outcome == "done"
+    assert state.history == ["clicked 'Load more'"] * 5  # every capture showed a longer page, so nothing stalled
+    assert len(world.fake.states[-1]["screen_items_in_reading_order"]) > len(
+        world.fake.states[0]["screen_items_in_reading_order"]
+    )
+
+
+def test_l32b_a_feed_that_never_grows_is_a_stall(monkeypatch, tmp_path):
+    world = World([Page(name="feed", items=["Post 1", "Post 2", "Post 3", "Load more"], url="https://example.com/feed")])
+    policy = scripted(*[("click_item", "Load more")] * 8)
+
+    state = drive(world, policy, goal=GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path)
+
+    assert state.outcome == "stalled"
+    assert state.history == ["clicked 'Load more'"] * 3  # the repeat rule ends it one step before the idle rule would
