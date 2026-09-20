@@ -197,3 +197,20 @@ def test_a_wait_gives_the_page_time_before_the_step_delay(monkeypatch):
     monkeypatch.setattr(macos, "sleep_watching", slept.append)
     assert actions._HANDLERS["wait"](None, None, [], None) == "waited"
     assert slept == [actions.WAIT_SECONDS]
+
+
+def test_clicking_a_duplicated_label_says_which_row(screen, calls):
+    items = [
+        Item(0, "Coldplay", 1.0, 100, 200, 300, 230),
+        Item(1, "Buy", 1.0, 420, 200, 480, 230),
+        Item(2, "Adele", 1.0, 100, 260, 300, 290),
+        Item(3, "Buy", 1.0, 420, 260, 480, 290),
+        Item(4, "Terms", 1.0, 100, 320, 300, 350),
+    ]
+
+    def clicking(key: str):
+        return SimpleNamespace(chosen=key)
+
+    assert actions.perform(clicking("3"), screen, items, None) == "clicked 'Buy' beside 'Adele'"
+    assert actions.perform(clicking("4"), screen, items, None) == "clicked 'Terms'"
+    assert [point for kind, point in calls if kind == "click"] == [(225.0, 137.5), (100.0, 167.5)]

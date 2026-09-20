@@ -10,7 +10,7 @@ from typesafe_sdk import TypeSafeClient
 
 from . import macos
 from .config import SITES
-from .decide import OFFSCREEN_PREFIX, Decision, verify_typed
+from .decide import OFFSCREEN_PREFIX, Decision, row_mates, verify_typed
 from .models import Field, Item, Screen
 from .writer import compose_text, compose_url
 
@@ -32,7 +32,10 @@ def perform(decision: Decision, screen: Screen, items: list[Item], ctx: Context)
     key = decision.chosen
     by_index = {str(it.index): it for it in items}
     if key in by_index:
-        return click_item(by_index[key], screen)
+        what = click_item(by_index[key], screen)
+        mates = row_mates(items).get(int(key))
+        # Three rows each end in a Buy: the line must say which, or trying one marks them all as tried.
+        return f"{what} beside {', '.join(repr(m) for m in mates)}" if mates else what
     if key.startswith(OFFSCREEN_PREFIX):
         return press_offscreen(key[len(OFFSCREEN_PREFIX) :], screen)
     handler = _HANDLERS.get(key)

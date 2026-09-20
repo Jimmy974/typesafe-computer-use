@@ -961,7 +961,9 @@ def test_l33_duplicate_labels_are_told_apart_by_their_row(monkeypatch, tmp_path)
     state = drive(world, coldplay_policy, goal="buy a ticket to Coldplay", monkeypatch=monkeypatch, tmp_path=tmp_path)
 
     assert state.outcome == "done"
-    assert state.history == ["clicked 'Buy'"]
+    assert state.history == [
+        "clicked 'Buy' beside 'Coldplay', 'Oct 2'"
+    ]  # the line says which Buy, so trying one does not mark them all
     assert world.page.name == "coldplay_checkout"
     assert world.log == ["click:Buy@1"]
 
@@ -1207,3 +1209,65 @@ def test_l36_a_long_run_mixes_everything(monkeypatch, tmp_path):
     login = next(i for i, s in enumerate(world.fake.states) if s["focused_field"] and s["focused_field"]["label"] == "Email")
     assert "type_email" in world.fake.asked[login]["kind"].criteria
     assert state.answer is not None and "$60" in state.answer.text  # the price was on a screen the run passed through
+
+
+LISTING_ROWS = [f"Row {n}" for n in range(1, 41)] + ["Buy"]
+
+
+def modal_listing_policy(state: dict, questions: dict) -> tuple:
+    """Dismiss the modal when it is up, otherwise buy; stop once Buy has been clicked twice."""
+    texts = [it["text"] for it in state["screen_items_in_reading_order"]]
+    if sum(1 for action in state["previous_actions"] if "Buy" in action) >= 2:
+        return ("done", None)
+    return ("click_item", "Close" if "Close" in texts else "Buy")
+
+
+def test_l37_a_small_modal_on_a_dense_page_is_not_mistaken_for_no_change(monkeypatch, tmp_path):
+    """Two lines over forty is a small share of the page, but it is a modal: the screen did change."""
+    listing = "https://example.com/listing"
+    world = World(
+        [
+            Page(name="listing", items=LISTING_ROWS, url=listing, on={"click:Buy": "modal"}),
+            Page(
+                name="modal",
+                items=[*LISTING_ROWS, "Sign up for news", "Close"],
+                url=listing,
+                on={"click:Close": "listing_after"},
+            ),
+            Page(name="listing_after", items=LISTING_ROWS, url=listing, on={"click:Buy": "checkout"}),
+            Page(name="checkout", items=["Order summary", "Pay now"], url="https://example.com/checkout"),
+        ]
+    )
+
+    state = drive(world, modal_listing_policy, goal=GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path)
+
+    assert state.outcome == "done"
+    assert state.history == ["clicked 'Buy'", "clicked 'Close'", "clicked 'Buy'"]
+    assert world.page.name == "checkout"
+    assert world.log == ["click:Buy", "click:Close", "click:Buy"]
+    assert state.idle == 0  # the modal opening and closing both counted as the screen moving
+
+
+def two_tickers(world: World) -> list[str]:
+    """A dense page with two lines that move on their own: a clock and an unread badge."""
+    return [f"12:{world.ticks:02d}", f"{world.ticks} new", *[f"Row {n}" for n in range(1, 31)], "Refresh"]
+
+
+def refresh_policy(state: dict, questions: dict) -> tuple:
+    return ("click_item", "Refresh")
+
+
+def test_l38_two_tickers_on_a_dense_page_let_a_futile_run_reach_the_step_limit(monkeypatch, tmp_path):
+    """Two lines changing every capture is more than one, so every capture reads as a new screen.
+
+    Nothing the run does achieves anything, and neither stop rule fires: the budget is spent instead.
+    That is the direction the rules are meant to err in -- a futile run that costs its steps, never a
+    working run cut short by a false stall -- and this scenario is here to keep that trade-off honest.
+    """
+    world = World([Page(name="board", items=two_tickers, url="https://example.com/board")])  # Refresh does nothing
+
+    state = drive(world, refresh_policy, goal=GOAL, steps=6, monkeypatch=monkeypatch, tmp_path=tmp_path)
+
+    assert state.outcome == "step limit"
+    assert state.history == ["clicked 'Refresh'"] * 6
+    assert world.log == ["click:Refresh"] * 6
