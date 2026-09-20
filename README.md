@@ -224,16 +224,20 @@ small packet and a structured reply:
 
 - **`type_text`** receives the goal, recent actions, the focused field's label and
   placeholder, and the OCR lines near the field. It returns `{fill, text}`. Credential
-  fields come back `fill: false` and nothing is typed. After typing, a Noul scores
-  whether the field now holds a sensible value. Under 0.5 the field is cleared.
+  fields come back `fill: false` and nothing is typed. The text is set as the field's
+  value where the element accepts one; otherwise the field is emptied and the text
+  typed, since keystrokes land after whatever it already holds. After typing, a Noul
+  scores whether the field now holds a sensible value. Under 0.5 the field is cleared.
 - **`use_browser`** with `site: other` receives the goal and returns `{ok, url}`.
   Code rejects anything that is not a clean https URL with a hostname.
 - **The answer**, once, when the loop stops itself. It receives the goal, every action
-  taken, why the run stopped, the text of the last screen, and the capture itself,
-  because OCR misreads a letter here and there and drops layout. It returns
-  `{achieved, answer}`, and is told to take the answer from the screen alone. When an
-  action ran after the last capture, the screen is captured again first. This one
-  call uses `CLICKER_ANSWER_MODEL`, a stronger reader than the per-step writer.
+  taken, why the run stopped, the text of the last screen, the capture itself, because
+  OCR misreads a letter here and there and drops layout, and the text of the last two
+  distinct screens before it, because the goal may ask for a price that was on the
+  listing and not on the checkout. It returns `{achieved, answer}`, and is told to take
+  the answer from those screens alone. When an action ran after the last capture, the
+  screen is captured again first. This one call uses `CLICKER_ANSWER_MODEL`, a stronger
+  reader than the per-step writer.
 
 Passwords are never typed. Rely on the browser's password manager or an SSO button
 the OCR can read.
