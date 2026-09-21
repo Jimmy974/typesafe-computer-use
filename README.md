@@ -64,7 +64,7 @@ cp .env.example .env     # fill in the keys
 | `CLICKER_EMAIL` | no | enables the `type_email` action |
 | `CLICKER_BROWSER` | no | defaults to `Google Chrome` |
 | `CLICKER_WRITER_MODEL` | no | defaults to `claude-haiku-4-5` |
-| `CLICKER_ANSWER_MODEL` | no | reads the last screen for the final answer; defaults to `claude-sonnet-5` |
+| `CLICKER_ANSWER_MODEL` | no | reads the screen whenever the classifier stops; defaults to `claude-sonnet-5` |
 
 Grant your terminal **Screen Recording** and **Accessibility** in System Settings >
 Privacy & Security. Without the first, captures are wallpaper. Without the second,
@@ -76,6 +76,7 @@ synthetic clicks are silently dropped, and `--act` refuses to start.
 uv run clicker "open the Playground"                 # dry run: one step, prints what it would do
 uv run clicker "open the Playground" --act           # drives the machine, up to 100 steps
 uv run clicker "log in" --act --steps 20 --delay 3   # longer and slower
+uv run clicker "log in" --act --handoffs 0           # the classifier alone: its first stop ends the run
 uv run clicker-inspect "any goal"                    # 3-2-1, capture, open the annotated screen + payload
 ```
 
@@ -83,7 +84,8 @@ Clear the terminal first. It is on screen, so its text is OCR input.
 
 **Stopping a live run.** Ctrl-C when the terminal has focus, or slam the mouse into the
 top-left corner of the screen from any app. The loop also stops itself on `done` or
-`none`, on confidence under `--min-confidence` (0.4), when it stalls, or at `--steps`.
+`none`, on confidence under `--min-confidence` (0.4), when it stalls, or at `--steps`. Each
+of those stops goes to the writer, which answers and may hand the run back (below).
 
 **Stalls.** Nothing in an action's description says what came of it; only the next capture
 does. So each step keeps a signature of the screen (the app, the page, the text on it) and
@@ -96,10 +98,39 @@ hide a stall, and a two-line modal on a dense page is not mistaken for nothing h
 When more than that changes every step, a run that is getting nowhere runs to `--steps`:
 the rules err toward running on, never toward stopping a run that is making progress.
 
-**The answer.** When the loop stops itself, the writer reads the screen it stopped on
+**The answer.** When the classifier stops, the writer reads the screen it stopped on
 and prints the result: the information the goal asked for, or where things stand and
 the next step when the screen does not hold it. A dry run that would have acted, and
 an aborted run, print no answer.
+
+**The hand-off.** A stop is not the end when the goal is not reached. One sentence of
+goal does not say which of two good moves comes first ("cheapest, and here in under a
+week": open the cheapest listing, or filter by delivery?), and a classifier split
+between them reads as low confidence. So the writer's answer may carry a **focus**,
+one move in terms of the screen ("Click the 'Arrives in 2-4 days' filter"), and the
+classifier goes back to work with the goal and the focus both in its state. On the
+capture that stopped such a run at 0.39, the same classifier picks the filter at
+0.92 under that focus. It may instead carry a **question**, put to you in the terminal
+when there is something only you can say ("13 or 15 inch?"); your reply joins the
+state for the rest of the run, the writer reads the screen again with it, and the app
+you were in comes back to the front. An empty reply declines, and the answer stands.
+The writer never picks a click: every action is still the classifier's.
+
+The exchange cannot go round on itself. A focus the classifier takes no action under
+leaves the answer it came with standing, without a second reading of the same screen.
+`--handoffs` (10) bounds the trips, three questions bound the asking, and a stop on
+the last step is final. A `done` the writer does not see on the screen is sent back
+like any other stop.
+
+**Who did the work.** Every run ends by counting the requests each model took:
+
+```
+calls: classifier 14 (82%, 3.9s)  writer 3 (18%, 21.4s)  handoffs 1  questions 0
+```
+
+The classifier's share is the number the design stands on. A task it falls on is a
+task the writer had to steer at every turn, and the fix belongs in the state the
+classifier reads, not in more hand-offs.
 
 ## How a step works
 
@@ -227,7 +258,8 @@ on the app, and the node and time caps bind first on a big tree: Notes and Chrom
 ### Where free text comes from
 
 The classifier never generates text. The writer model runs in three places, each with a
-small packet and a structured reply:
+small packet and a structured reply. Each packet also carries the current focus and what
+the user said, once there are any:
 
 - **`type_text`** receives the goal, recent actions, the focused field's label and
   placeholder, and the OCR lines near the field. It returns `{fill, text}`. Credential
@@ -237,12 +269,14 @@ small packet and a structured reply:
   scores whether the field now holds a sensible value. Under 0.5 the field is cleared.
 - **`use_browser`** with `site: other` receives the goal and returns `{ok, url}`.
   Code rejects anything that is not a clean https URL with a hostname.
-- **The answer**, once, when the loop stops itself. It receives the goal, every action
-  taken, why the run stopped, the text of the last screen, the capture itself, because
+- **The answer**, each time the classifier stops. It receives the goal, every action
+  taken, why the run stopped, the earlier stops with the focus given at each, whether
+  anybody is at the terminal to be asked, the text of the last screen, the capture itself, because
   OCR misreads a letter here and there and drops layout, and the text of the distinct
   screens before it, newest first up to 600 lines, because the goal may ask for a price
-  that was on the listing and not on the checkout. It returns `{achieved, answer}`, and is told to take
-  the answer from those screens alone. When an action ran after the last capture, the
+  that was on the listing and not on the checkout. It returns `{achieved, answer, focus, question}`,
+  and is told to take the answer from those screens and the user's replies alone, to give a focus
+  as one move and not a plan, and never to ask for a credential. When an action ran after the last capture, the
   screen is captured again first. This one call uses `CLICKER_ANSWER_MODEL`, a stronger
   reader than the per-step writer.
 
@@ -255,7 +289,8 @@ Every run writes `runs/<timestamp>/` so a stall can be replayed and fixed offlin
 
 | file | contents |
 |---|---|
-| `run.log`, `run.json` | everything printed; goal, outcome (`done`, `nothing helps`, `low confidence`, `stalled`, `step limit`, `dry run`, `aborted`, `crashed`), `answer` and `goal_achieved`, seconds, every action, config, and `timing` (mean and max seconds per phase, with `steps_timed`) |
+| `run.log`, `run.json` | everything printed; goal, outcome (`done`, `nothing helps`, `low confidence`, `stalled`, `step limit`, `dry run`, `aborted`, `crashed`), `answer` and `goal_achieved`, seconds, `calls` (requests, share and seconds per model), `handoffs` (step, why the classifier stopped, the focus given), `questions` and replies, every action, config, and `timing` (mean and max seconds per phase, with `steps_timed`) |
+| `step-NNN-review.json` | what the writer made of a stop on that step: each answer, focus or question, your reply, and whether the run was handed back |
 | `answer-raw.png` | the capture the answer was read from, when an action made the last step's capture stale |
 | `step-NNN-raw.png` | the capture |
 | `step-NNN.png` | items numbered in blue, accessibility ones orange, the chosen one red, the focused field green |
@@ -287,9 +322,12 @@ typesafe_computer_use/
                   source, and the merge of the two
   dates.py        date parsing and "in N days" hints
   decide.py       state, criteria, the three-Choice request, the Noul check
-  writer.py       the writer model, structured replies, URL validation, the final answer
+  writer.py       the writer model, structured replies, URL validation, the answer
+                  with its focus or question
   actions.py      one handler per action, each returning a history line
-  runner.py       the step loop, run folder, stop rules, the hand-off for the answer
+  runner.py       the step loop, run folder, stop rules, the hand-off to the writer
+                  and back
+  calls.py        requests counted per model, at the two clients
   report.py       logging, annotated screenshots, payload dump
   timing.py       phase stopwatches, the timing line, run summary
   cli.py          `clicker` and `clicker-inspect`
@@ -317,6 +355,9 @@ as callables, so only those three bindings change. Nothing else knows the platfo
   lists nothing) reads as a cycle and stops the run: the capture is the only witness.
 - Using the machine during an `--act` run fights it for focus and the cursor.
 - The site catalog is small on purpose; the writer covers the rest.
+- Stacked short lines merge into one item, so a list of checkboxes ("Arrives in 2-4
+  days", "Free Shipping", "Local Pickup") that the app does not publish through
+  accessibility is one click target, aimed at its middle.
 
 ## Development
 

@@ -133,6 +133,7 @@ class World:
         self.log: list[str] = []
         self.mouse: list[tuple[float, float]] = []
         self.fake: FakeTypeSafe | None = None  # the classifier `drive` built, for fake.states
+        self.asked: list[str] = []  # the questions the writer put to the user
         self.loading = {p.name: p.loads_in for p in pages}
         self.ticks = 0  # captures taken so far, so a page can show something that moves on its own
         self._refs: dict[str, Ref] = {}  # action -> the element, so a ref stays the same object
@@ -425,15 +426,22 @@ class FakeWriter:
     """Stands in for the Anthropic client, answering by which properties the request asks for.
 
     The three writer calls are told apart by their schemas, exactly as `writer.py` builds them:
-    a field fill, a proposed URL, and the final answer. The answer is the text of the screen the
+    a field fill, a proposed URL, and the answer. The answer is the text of the screen the
     run stopped on, plus the text of any earlier screens the packet carries, so a scenario can
     assert through the answer both where the run ended and what it read on the way.
+
+    `reviews` scripts what the writer makes of each stop, one entry per answer asked for: a dict
+    of the reply's fields, or a callable(packet) returning one. {"focus": ...} sends the classifier
+    back, {"question": ...} asks the user, and either says the goal is not reached yet. Once the
+    script is spent, every stop is the goal achieved, as it is with no script at all.
     """
 
-    def __init__(self, text: str = "", url: str = ""):
+    def __init__(self, text: str = "", url: str = "", reviews: list | None = None):
         self.requests: list[dict] = []
         self.text = text
         self.url = url
+        self.reviews = list(reviews or [])
+        self.packets: list[dict] = []  # the packet of every answer asked for, in order
         self.messages = SimpleNamespace(create=self._create)
 
     def _create(self, **request):
@@ -444,9 +452,18 @@ class FakeWriter:
             reply = {"fill": bool(self.text), "text": self.text, "reason": "the goal names what to type"}
         elif asked == {"ok", "url", "reason"}:
             reply = {"ok": bool(self.url), "url": self.url, "reason": "the goal names the site"}
-        elif asked == {"achieved", "answer"}:
+        elif asked == {"achieved", "answer", "focus", "question"}:
+            self.packets.append(packet)
             earlier = [text for screen in packet.get("earlier_screens", []) for text in screen["text"]]
-            reply = {"achieved": True, "answer": " ".join(packet["screen_text_in_reading_order"] + earlier)}
+            scripted = self.reviews.pop(0) if self.reviews else {}
+            scripted = scripted(packet) if callable(scripted) else scripted
+            reply = {
+                "achieved": not scripted,
+                "answer": " ".join(packet["screen_text_in_reading_order"] + earlier),
+                "focus": "",
+                "question": "",
+                **scripted,
+            }
         else:
             raise AssertionError(f"the writer was asked for {sorted(asked)}")
         return SimpleNamespace(content=[SimpleNamespace(type="text", text=json.dumps(reply))])
@@ -462,17 +479,37 @@ def drive(
     writer: FakeWriter | None = None,
     email: str | None = None,
     noul: float = 0.95,
+    replies: list[str] | None = None,
+    handoffs: int | None = None,
 ) -> RunState:
-    """Run the real loop against the world until it stops itself. `world.fake` holds the classifier."""
+    """Run the real loop against the world until it stops itself. `world.fake` holds the classifier.
+
+    `replies` are what the user types when the writer asks, in order; with none, nobody is at the
+    terminal and the writer is told so. `world.asked` collects the questions that were put.
+    """
     world.install(monkeypatch)
     fake = FakeTypeSafe(policy, noul)
     world.fake = fake
     monkeypatch.setattr(runner, "TypeSafeClient", lambda: fake)
     cfg = RunConfig(goal=goal, out=tmp_path / "run", act=True, steps=steps, delay=0)
+    if handoffs is not None:
+        cfg.handoffs = handoffs
     client = writer or FakeWriter()
+    left = list(replies or [])
+
+    def ask(question: str) -> str:
+        world.asked.append(question)
+        return left.pop(0) if left else ""
+
     return run(
         cfg,
         lambda typesafe, history: Context(
-            goal=goal, browser="Google Chrome", email=email, typesafe=typesafe, writer=client, history=history
+            goal=goal,
+            browser="Google Chrome",
+            email=email,
+            typesafe=typesafe,
+            writer=client,
+            history=history,
+            ask=ask if replies is not None else None,
         ),
     )

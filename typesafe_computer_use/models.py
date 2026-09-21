@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 
 from PIL import Image
 
@@ -33,6 +33,41 @@ ROLE_WORDS = {
 
 class Abort(Exception):
     """Raised when the user triggers an escape hatch."""
+
+
+@dataclass(frozen=True)
+class Exchange:
+    """One question the writer put to the user, and what the user said."""
+
+    question: str
+    reply: str
+
+
+@dataclass(frozen=True)
+class Guidance:
+    """What the run has learned about its goal since it began.
+
+    The goal is one sentence and never changes. `focus` is the sub-goal the writer sent the
+    classifier back to work on the last time the classifier stopped, and `exchanges` are the
+    questions the user answered on the way. Every model call reads both, so the classifier
+    steers by them and the writer types by them.
+    """
+
+    focus: str | None = None
+    exchanges: tuple[Exchange, ...] = ()
+
+    def focused(self, focus: str) -> Guidance:
+        return replace(self, focus=focus)
+
+    def heard(self, question: str, reply: str) -> Guidance:
+        return replace(self, exchanges=(*self.exchanges, Exchange(question, reply)))
+
+    def state(self) -> dict:
+        """The keys a model packet carries, and only the ones that hold something."""
+        return {
+            **({"current_focus": self.focus} if self.focus else {}),
+            **({"user_said": [{"asked": e.question, "replied": e.reply} for e in self.exchanges]} if self.exchanges else {}),
+        }
 
 
 Signature = tuple[

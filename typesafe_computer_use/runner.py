@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 import anthropic
@@ -12,9 +12,10 @@ from typesafe_sdk import TypeSafeClient
 
 from . import macos
 from .actions import Context, perform
-from .config import DEFAULT_DELAY, DEFAULT_MIN_CONFIDENCE, DEFAULT_STEPS, MAX_OPTIONS
+from .calls import Calls, MeteredClassifier, MeteredWriter
+from .config import DEFAULT_DELAY, DEFAULT_HANDOFFS, DEFAULT_MIN_CONFIDENCE, DEFAULT_STEPS, MAX_OPTIONS
 from .decide import Decision, decide, offscreen_records
-from .models import Abort, Item, Screen, Signature, same_screen, signature
+from .models import Abort, Guidance, Item, Screen, Signature, same_screen, signature
 from .perception import OcrCache, capture, perceive
 from .report import Log, annotate, ax_count, render_payload, top
 from .timing import format_timing, phase, summarize
@@ -25,9 +26,10 @@ from .writer import Answer, compose_answer
 MAX_IDLE = 3  # consecutive actions that left the screen as it was: refusals, waits on a spinner, scrolls at the bottom
 MAX_REPEATS = 2  # consecutive actions already taken on the same screen earlier in the run: a cycle, or a click that does nothing
 EARLIER_LINES = 600  # lines of text from the screens before the last one that the answer may also be read from
+MAX_QUESTIONS = 3  # questions the writer may put to the user in one run; an empty reply ends the asking sooner
 
-# The outcomes that end with an answer, each in words the writer can pass on. A dry run took no
-# action and an abort is the user's own stop, so neither has anything to report.
+# The outcomes the writer is handed, each in words it can pass on. A dry run took no action and
+# an abort is the user's own stop, so neither has anything to report.
 STOPPED = {
     "done": "the classifier judged the goal already achieved on this screen",
     "nothing helps": "the classifier found nothing on this screen that helps with the goal",
@@ -45,6 +47,7 @@ class RunConfig:
     steps: int = DEFAULT_STEPS
     min_confidence: float = DEFAULT_MIN_CONFIDENCE
     delay: float = DEFAULT_DELAY
+    handoffs: int = DEFAULT_HANDOFFS  # stops the writer may send the classifier back from; 0 makes every stop final
     image: Path | None = None  # replay a saved capture (never acts)
     app: str | None = None  # frontmost app to report during replay
     url: str | None = None  # browser URL to report during replay
@@ -52,6 +55,16 @@ class RunConfig:
     @property
     def replay(self) -> bool:
         return self.image is not None
+
+
+@dataclass(frozen=True)
+class Handoff:
+    """One stop the writer sent the classifier back from."""
+
+    step: int
+    outcome: str  # why the classifier stopped
+    focus: str  # what the writer sent it back to do
+    actions: int  # how many actions the run had taken by then, so a focus that led to none can be told
 
 
 @dataclass
@@ -67,7 +80,10 @@ class RunState:
     outcome: str = "crashed"  # every way out of the loop names its own; only an exception leaves this
     ocr_cache: OcrCache = field(default_factory=OcrCache)  # carries one step's OCR into the next
     view: tuple[Screen, list[Item]] | None = None  # the latest capture, until an action makes it stale
-    answer: Answer | None = None
+    answer: Answer | None = None  # the writer's latest; the last one is the run's answer
+    guidance: Guidance = field(default_factory=Guidance)  # the writer's focus and the user's replies, as they stand
+    handoffs: list[Handoff] = field(default_factory=list)
+    calls: Calls = field(default_factory=Calls)  # requests to each model, over the whole run
 
 
 def run(cfg: RunConfig, ctx_factory) -> RunState:
@@ -82,14 +98,17 @@ def run(cfg: RunConfig, ctx_factory) -> RunState:
     started = time.time()
     try:
         with TypeSafeClient() as typesafe:
-            ctx = ctx_factory(typesafe, state.history)
+            ctx = metered(ctx_factory(typesafe, state.history), state.calls)
             for step in range(1, cfg.steps + 1):
-                if not run_step(cfg, ctx, state, step, log):
+                if run_step(cfg, ctx, state, step, log):
+                    continue
+                if not hand_off(cfg, ctx, state, step, log):
                     break
+                ctx = replace(ctx, guidance=state.guidance)
             else:
                 log(f"\nstopped after {cfg.steps} steps")
                 state.outcome = "step limit"
-            conclude(cfg, ctx, state, log)
+                hand_off(cfg, ctx, state, cfg.steps, log)
     except (KeyboardInterrupt, Abort) as e:
         state.outcome = f"aborted ({e or 'Ctrl-C'})"
         log(f"\n{state.outcome} after {len(state.history)} actions")
@@ -102,28 +121,103 @@ def run(cfg: RunConfig, ctx_factory) -> RunState:
             "answer": state.answer.text if state.answer else None,
             "goal_achieved": state.answer.achieved if state.answer else None,
             "seconds": round(time.time() - started, 1),
+            "calls": state.calls.summary(),
+            "handoffs": [asdict(h) for h in state.handoffs],
+            "questions": [asdict(e) for e in state.guidance.exchanges],
             "timing": summarize(state.timings),
             "history": state.history,
             "config": {k: str(v) for k, v in asdict(cfg).items()},
         }
         (cfg.out / "run.json").write_text(json.dumps(summary, indent=2))
+        log(f"{state.calls.line()}  handoffs {len(state.handoffs)}  questions {len(state.guidance.exchanges)}")
         log(f"run folder: {cfg.out}")
     return state
 
 
-def conclude(cfg: RunConfig, ctx: Context, state: RunState, log: Log) -> None:
-    """Hand the screen the run ended on to the writer, for the answer the classifier cannot put into words.
+def metered(ctx: Context, calls: Calls) -> Context:
+    """The same context, with every request to either model counted."""
+    return replace(
+        ctx,
+        typesafe=MeteredClassifier(ctx.typesafe, calls),
+        writer=MeteredWriter(ctx.writer, calls) if ctx.writer is not None else None,
+    )
+
+
+def hand_off(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log) -> bool:
+    """The classifier stopped: hand the run to the writer. True when the writer handed it back.
+
+    The classifier can stop on the right page but cannot say what the page says, and it can stop
+    short because one sentence of goal does not say which of two good moves comes first. The writer
+    reads the screen and answers for the user either way. When the goal is not reached it may also
+    name a focus, which sends the classifier back to work with `state.guidance` saying what on, or
+    a question, which goes to the user first; the writer then reads the same screen again with the
+    reply. Each reply is new information and each focus must lead to an action, so the exchange
+    cannot go round on itself: a focus the classifier could not act on leaves the answer that came
+    with it standing.
+    """
+    stopped = STOPPED.get(state.outcome)
+    if stopped is None:
+        return False
+    if ctx.writer is None:
+        log("\nno answer: the writer is disabled (set ANTHROPIC_API_KEY)")
+        return False
+    if state.handoffs and state.handoffs[-1].actions == len(state.history) and state.answer is not None:
+        log(f"\nanswer ({verdict(state.answer)}; the focus led to no action, so the last answer stands):\n  {state.answer.text}")
+        return False
+
+    may_resume = step < cfg.steps and len(state.handoffs) < cfg.handoffs
+    reviews: list[dict] = []
+    while True:
+        can_ask = may_resume and ctx.ask is not None and len(state.guidance.exchanges) < MAX_QUESTIONS
+        started = time.perf_counter()
+        try:
+            answer = review(cfg, ctx, state, stopped, can_ask)
+        except anthropic.APIError as e:
+            log(f"\nno answer: the writer failed ({e})")
+            return False
+        state.answer = answer
+        seconds = time.perf_counter() - started
+        record = {"outcome": state.outcome, "seconds": round(seconds, 3), **asdict(answer), "reply": None, "handed_back": False}
+        reviews.append(record)
+        try:
+            resuming = may_resume and not answer.achieved
+            if resuming and can_ask and answer.question:
+                log(f"\nreview ({verdict(answer)}, {seconds:.1f}s):\n  {answer.text}\n  the writer asks: {answer.question}")
+                reply = ctx.ask(answer.question).strip()
+                record["reply"] = reply
+                log(f"  > {reply}", echo=False)  # the terminal already shows what was typed
+                if not reply:
+                    log("  no reply, so the answer stands")
+                    return False
+                state.guidance = state.guidance.heard(answer.question, reply)
+                if cfg.act and not cfg.replay and state.view is not None:
+                    macos.activate(state.view[0].app)  # answering took the terminal to the front; put the work back there
+                continue
+            if resuming and answer.focus:
+                log(
+                    f"\nreview ({verdict(answer)}, {seconds:.1f}s):\n  {answer.text}\n  back to the classifier, focus: {answer.focus}"
+                )
+                record["handed_back"] = True
+                state.handoffs.append(Handoff(step, state.outcome, answer.focus, len(state.history)))
+                state.guidance = state.guidance.focused(answer.focus)
+                state.idle = state.repeats = 0  # the stall was under the old focus; the new one starts clean
+                return True
+            log(f"\nanswer ({verdict(answer)}, {seconds:.1f}s):\n  {answer.text}")
+            return False
+        finally:
+            (cfg.out / f"step-{step:03d}-review.json").write_text(json.dumps(reviews, indent=2))
+
+
+def verdict(answer: Answer) -> str:
+    return "goal achieved" if answer.achieved else "goal not achieved"
+
+
+def review(cfg: RunConfig, ctx: Context, state: RunState, stopped: str, can_ask: bool) -> Answer:
+    """Have the writer read the screen the classifier stopped on.
 
     The last step's capture serves when nothing acted after it. An action makes it stale, so the
     screen is captured again, and saved so the answer can be checked against what it was read from.
     """
-    stopped = STOPPED.get(state.outcome)
-    if stopped is None:
-        return
-    if ctx.writer is None:
-        log("\nno answer: the writer is disabled (set ANTHROPIC_API_KEY)")
-        return
-    started = time.perf_counter()
     if state.view is None:
         macos.check_abort()
         screen = capture(cfg.image, cfg.app, cfg.url, ctx.browser)
@@ -131,13 +225,10 @@ def conclude(cfg: RunConfig, ctx: Context, state: RunState, log: Log) -> None:
         state.view = (screen, perceive(screen, MAX_OPTIONS, cfg.goal))
     screen, items = state.view
     earlier = earlier_screens(state, signature(screen, items))
-    try:
-        state.answer = compose_answer(ctx.writer, cfg.goal, screen, items, state.history, stopped, earlier)
-    except anthropic.APIError as e:
-        log(f"\nno answer: the writer failed ({e})")
-        return
-    verdict = "goal achieved" if state.answer.achieved else "goal not achieved"
-    log(f"\nanswer ({verdict}, {time.perf_counter() - started:.1f}s):\n  {state.answer.text}")
+    earlier_stops = [{"after_action": h.actions, "why": STOPPED[h.outcome], "focus_given": h.focus} for h in state.handoffs]
+    return compose_answer(
+        ctx.writer, cfg.goal, screen, items, state.history, stopped, earlier, state.guidance, earlier_stops, can_ask
+    )
 
 
 def earlier_screens(state: RunState, final: Signature, budget: int = EARLIER_LINES) -> list[dict]:
@@ -174,11 +265,11 @@ def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
     prefix = cfg.out / f"step-{step:03d}"  # three digits, so a run of 100 steps still lists in order
     screen.image.save(prefix.with_name(prefix.name + "-raw.png"))
     prefix.with_name(prefix.name + "-payload.txt").write_text(
-        render_payload(cfg.goal, screen, items, state.history, ctx.browser, ctx.email, tried)
+        render_payload(cfg.goal, screen, items, state.history, ctx.browser, ctx.email, tried, ctx.guidance)
     )
 
     with phase(timing, "decide"):
-        decision = decide(ctx.typesafe, cfg.goal, screen, items, state.history, ctx.browser, ctx.email, tried)
+        decision = decide(ctx.typesafe, cfg.goal, screen, items, state.history, ctx.browser, ctx.email, tried, ctx.guidance)
     by_index = {str(it.index): it for it in items}
     annotate(screen, items, decision.chosen, prefix.with_suffix(".png"))
 

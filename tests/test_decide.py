@@ -11,7 +11,7 @@ from typesafe_computer_use.decide import (
     row_mates,
     site_criteria,
 )
-from typesafe_computer_use.models import AxNode
+from typesafe_computer_use.models import AxNode, Guidance
 
 
 def answer(choice, confidence, probabilities=None):
@@ -126,3 +126,14 @@ def test_a_duplicated_label_names_its_row_and_a_unique_one_does_not(screen, make
     state = base_state("buy a ticket to Coldplay", screen, items, [])
     rows = state["screen_items_in_reading_order"]
     assert rows[5]["beside"] == ["Coldplay", "Oct 2"] and "beside" not in rows[3]
+
+
+def test_guidance_reaches_the_state_only_when_there_is_some(screen, make_item):
+    items = [make_item(0, "Buy")]
+    guided = Guidance().heard("13 or 15 inch?", "15").focused("Click '15 inch'")
+
+    assert not {"current_focus", "user_said"} & set(base_state("buy the thing", screen, items, [], None, Guidance()))
+    state = base_state("buy the thing", screen, items, [], None, guided)
+    assert state["current_focus"] == "Click '15 inch'"
+    assert state["user_said"] == [{"asked": "13 or 15 inch?", "replied": "15"}]
+    assert list(state)[:3] == ["goal", "current_focus", "user_said"]  # beside the goal they refine

@@ -13,6 +13,9 @@ so a stall can be replayed offline with `--image`.
   and handed over as state.
 - Free text only ever comes from `writer.py`, with a structured reply and a
   code-side guard.
+- The writer never picks an action. When the classifier stops it may name a focus
+  or ask the user, and the classifier takes every step from there. Watch the
+  `calls:` line: a change that moves work to the writer should say why.
 - Platform calls live in `macos.py` only.
 - Never add a path that types a password.
 

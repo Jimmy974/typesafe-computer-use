@@ -126,7 +126,7 @@ def test_use_browser_asks_the_writer_for_a_site_outside_the_catalog(screen, brow
     monkeypatch.setattr(
         actions,
         "compose_url",
-        lambda w, goal, history: asked.append((w, goal)) or "https://www.songkick.com/",
+        lambda w, goal, history, guidance: asked.append((w, goal)) or "https://www.songkick.com/",
     )
     assert actions.perform(browsing("other"), screen, [], context(writer)) == "opened https://www.songkick.com/"
     assert asked == [(writer, "find the next upcoming bruno mars concert")]
@@ -140,7 +140,7 @@ def test_use_browser_without_a_writer_refuses_a_site_outside_the_catalog(screen,
 
 
 def test_use_browser_refuses_when_the_writer_proposes_nothing(screen, browser, monkeypatch):
-    monkeypatch.setattr(actions, "compose_url", lambda writer, goal, history: "")
+    monkeypatch.setattr(actions, "compose_url", lambda writer, goal, history, guidance: "")
     refusal = actions.perform(browsing("other"), screen, [], context(object()))
     assert refusal == "use_browser refused: the writer proposed no usable URL for this goal"
     assert browser == []

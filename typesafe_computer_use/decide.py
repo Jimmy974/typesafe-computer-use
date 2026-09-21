@@ -9,7 +9,7 @@ from typesafe_sdk import Choice, ChoiceAnswer, Noul, TypeSafeClient
 
 from .config import SITES
 from .dates import date_hints, now_context
-from .models import AxNode, Field, Item, Screen
+from .models import AxNode, Field, Guidance, Item, Screen
 
 STOP_KINDS = ("done", "none")
 OFFSCREEN_PREFIX = "offscreen:"
@@ -17,6 +17,12 @@ PRESS_OFFSCREEN = (
     "Activate a labelled control that the app exposes but that is not currently visible on screen "
     "(chosen in the offscreen question). Use when the needed control is known to exist but is "
     "scrolled out of view or not yet shown."
+)
+
+# Said only while a focus is set, so a run the writer never steered asks the question it always asked.
+FOCUS_RULE = (
+    " The current focus is the next step on the way to the goal, set by a reviewer that read the "
+    "screen when you last stopped: work toward it. 'done' still means the goal itself, not the focus."
 )
 
 
@@ -117,13 +123,22 @@ def site_criteria() -> dict[str, str]:
     }
 
 
-def base_state(goal: str, screen: Screen, items: list[Item], history: list[str], tried: list[str] | None = None) -> dict:
+def base_state(
+    goal: str,
+    screen: Screen,
+    items: list[Item],
+    history: list[str],
+    tried: list[str] | None = None,
+    guidance: Guidance | None = None,
+) -> dict:
     """The facts the classifier reads. `tried` lists the actions already taken on this same screen
-    earlier in the run, each of which led back here: a fact the code knows and the model cannot."""
+    earlier in the run, each of which led back here: a fact the code knows and the model cannot.
+    `guidance` is what the writer and the user added to the goal when the classifier last stopped."""
     hints = date_hints(items, screen)
     mates = row_mates(items)
     return {
         "goal": goal,
+        **(guidance.state() if guidance else {}),
         "now": now_context(),
         "frontmost_app": screen.app,
         "browser_active_tab_url": screen.url,
@@ -194,6 +209,7 @@ def decide(
     browser: str,
     email: str | None,
     tried: list[str] | None = None,
+    guidance: Guidance | None = None,
 ) -> Decision:
     questions = {
         "kind": Choice(
@@ -202,6 +218,7 @@ def decide(
                 "makes the most progress toward the goal right now? Do not repeat an action "
                 "that was just taken unless the screen changed, and never one listed as already "
                 "tried on this screen: each of those led straight back here."
+                + (FOCUS_RULE if guidance and guidance.focus else "")
             ),
             criteria=kind_criteria(browser, email, bool(screen.offscreen)),
         ),
@@ -232,7 +249,7 @@ def decide(
             ),
             criteria=offscreen_criteria(screen.offscreen),
         )
-    answers = client.system_one(state=base_state(goal, screen, items, history, tried), questions=questions).answers
+    answers = client.system_one(state=base_state(goal, screen, items, history, tried, guidance), questions=questions).answers
     return Decision(kind=answers["kind"], item=answers.get("item"), site=answers["site"], offscreen=answers.get("offscreen"))
 
 

@@ -1428,3 +1428,278 @@ def test_l41_a_single_page_search_changes_results_not_the_url(monkeypatch, tmp_p
     assert world.log == ["type:bruno mars", "enter", "click:Buy"]
     last = json.loads((tmp_path / "run" / "step-003-answers.json").read_text())
     assert (last["idle_actions"], last["repeated_actions"]) == (0, 0)  # a page that only changed its text still moved
+
+
+# ----- the hand-off: the classifier stops, the writer reads the screen, and the run goes on -----
+
+SHOP_GOAL = "find the cheapest macbook that arrives in under a week"
+FILTER = "Arrives in 2-4 days"
+
+
+def shop() -> World:
+    """A results page where two moves both look right: open the cheapest listing, or filter by delivery first."""
+    results = "https://shop.example.com/search?q=macbook"
+    return World(
+        [
+            Page(
+                name="results",
+                items=["Sort: lowest price", FILTER, "MacBook 2010", "$59.75"],
+                url=results,
+                on={f"click:{FILTER}": "filtered", "click:MacBook 2010": "slow listing"},
+            ),
+            Page(name="filtered", items=[f"{FILTER} x", "MacBook Air 2015", "$140.00"], url=results + "&fast=1"),
+            Page(name="slow listing", items=["MacBook 2010", "$59.75", "Arrives in 3 weeks"], url="https://shop.example.com/1"),
+        ]
+    )
+
+
+def torn_until_focused(state: dict, questions: dict) -> tuple:
+    """Split between the listing and the filter until a focus says which, then sure of it."""
+    if state["browser_active_tab_url"].endswith("&fast=1"):
+        return ("done", None)
+    focus = state.get("current_focus")
+    if focus is None:
+        return ("click_item", "MacBook 2010", 0.38)
+    return ("click_item", next(it["text"] for it in state["screen_items_in_reading_order"] if it["text"] in focus))
+
+
+def test_l42_a_stop_between_two_good_moves_is_settled_by_the_writer_and_the_run_goes_on(monkeypatch, tmp_path):
+    world = shop()
+    writer = FakeWriter(reviews=[{"focus": f"Click the '{FILTER}' filter"}])
+
+    state = drive(world, torn_until_focused, goal=SHOP_GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path, writer=writer)
+
+    assert state.outcome == "done"
+    assert world.page.name == "filtered"
+    assert world.log == [f"click:{FILTER}"]
+    assert [(h.step, h.outcome, h.focus, h.actions) for h in state.handoffs] == [
+        (1, "low confidence", f"Click the '{FILTER}' filter", 0)
+    ]
+    assert state.answer.achieved and "MacBook Air 2015" in state.answer.text
+    # The classifier was asked under the focus, and told what a focus is, only once there was one.
+    states, asked = world.fake.states, world.fake.asked
+    assert "current_focus" not in states[0] and "current focus" not in asked[0]["kind"].instructions
+    assert states[1]["current_focus"] == f"Click the '{FILTER}' filter" and "current focus" in asked[1]["kind"].instructions
+    # The second time round, the writer is told where it sent the classifier the first time.
+    assert "earlier_stops" not in writer.packets[0]
+    assert writer.packets[1]["earlier_stops"] == [
+        {
+            "after_action": 0,
+            "why": "the classifier was not confident enough in any next action",
+            "focus_given": state.handoffs[0].focus,
+        }
+    ]
+    reviews = json.loads((tmp_path / "run" / "step-001-review.json").read_text())
+    assert [(r["outcome"], r["focus"], r["handed_back"]) for r in reviews] == [("low confidence", state.handoffs[0].focus, True)]
+
+
+def test_l43_a_focus_the_classifier_cannot_act_on_leaves_the_answer_standing(monkeypatch, tmp_path):
+    world = shop()
+    writer = FakeWriter(reviews=[{"focus": "Open the listing", "answer": "Not confirmed yet."}])
+    unsure = scripted(("click_item", "MacBook 2010", 0.38), ("click_item", "MacBook 2010", 0.38))
+
+    state = drive(world, unsure, goal=SHOP_GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path, writer=writer)
+
+    assert state.outcome == "low confidence"
+    assert world.log == []
+    assert len(world.fake.states) == 2  # asked again under the focus, and no surer
+    assert len(writer.packets) == 1  # the same screen and no new action: nothing to read a second time
+    assert state.answer.text == "Not confirmed yet." and not state.answer.achieved
+
+
+def test_l44_the_writer_asks_the_user_and_the_reply_steers_the_rest_of_the_run(monkeypatch, tmp_path):
+    world = World(
+        [
+            Page(
+                name="sizes",
+                items=["13 inch", "15 inch"],
+                url="https://shop.example.com/sizes",
+                on={"click:13 inch": "small", "click:15 inch": "large"},
+            ),
+            Page(name="small", items=["MacBook Air 13", "$140.00"], url="https://shop.example.com/13"),
+            Page(name="large", items=["MacBook Air 15", "$210.00"], url="https://shop.example.com/15"),
+        ]
+    )
+
+    def policy(state: dict, questions: dict) -> tuple:
+        if state["browser_active_tab_url"].endswith("/sizes"):
+            said = state.get("user_said")
+            return ("click_item", f"{said[0]['replied']} inch") if said else ("none", None)
+        return ("done", None)
+
+    def focus_on_the_reply(packet: dict) -> dict:
+        return {"focus": f"Click '{packet['user_said'][0]['replied']} inch'"}
+
+    writer = FakeWriter(reviews=[{"question": "13 or 15 inch?"}, focus_on_the_reply])
+
+    state = drive(world, policy, goal=SHOP_GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path, writer=writer, replies=["15"])
+
+    assert state.outcome == "done"
+    assert world.asked == ["13 or 15 inch?"]
+    assert world.page.name == "large"
+    assert world.log == ["activate", "click:15 inch"]  # the reply was typed in the terminal, so the work is brought back first
+    assert writer.packets[0]["user_can_be_asked"] and "user_said" not in writer.packets[0]
+    assert writer.packets[1]["user_said"] == [{"asked": "13 or 15 inch?", "replied": "15"}]
+    assert [h.focus for h in state.handoffs] == ["Click '15 inch'"]
+    summary = json.loads((tmp_path / "run" / "run.json").read_text())
+    assert summary["questions"] == [{"question": "13 or 15 inch?", "reply": "15"}]
+    reviews = json.loads((tmp_path / "run" / "step-001-review.json").read_text())
+    assert [(r["question"], r["reply"], r["handed_back"]) for r in reviews] == [("13 or 15 inch?", "15", False), ("", None, True)]
+
+
+def test_l45_with_nobody_at_the_terminal_a_question_is_never_put(monkeypatch, tmp_path):
+    world = shop()
+    writer = FakeWriter(reviews=[{"question": "13 or 15 inch?"}])
+
+    state = drive(world, scripted(("none", None)), goal=SHOP_GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path, writer=writer)
+
+    assert state.outcome == "nothing helps"
+    assert world.asked == []
+    assert writer.packets[0]["user_can_be_asked"] is False
+    assert len(writer.packets) == 1 and not state.answer.achieved
+
+
+def test_l46_a_user_who_declines_to_answer_ends_the_run(monkeypatch, tmp_path):
+    world = shop()
+    writer = FakeWriter(reviews=[{"question": "13 or 15 inch?"}])
+
+    state = drive(
+        world, scripted(("none", None)), goal=SHOP_GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path, writer=writer, replies=[""]
+    )
+
+    assert state.outcome == "nothing helps"
+    assert world.asked == ["13 or 15 inch?"]
+    assert world.log == [] and state.handoffs == []
+    assert len(writer.packets) == 1
+
+
+def test_l47_the_asking_is_bounded(monkeypatch, tmp_path):
+    world = shop()
+    writer = FakeWriter(reviews=[{"question": f"question {n}?"} for n in range(9)])
+
+    state = drive(
+        world,
+        scripted(("none", None)),
+        goal=SHOP_GOAL,
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        writer=writer,
+        replies=["a", "b", "c", "d"],
+    )
+
+    assert world.asked == ["question 0?", "question 1?", "question 2?"]
+    assert [p["user_can_be_asked"] for p in writer.packets] == [True, True, True, False]
+    assert state.outcome == "nothing helps" and not state.answer.achieved
+
+
+def test_l48_a_done_the_writer_does_not_see_on_screen_is_sent_back(monkeypatch, tmp_path):
+    """The classifier calls the results page the answer; the writer reads it and finds no delivery time."""
+    world = shop()
+    writer = FakeWriter(reviews=[{"focus": f"Click the '{FILTER}' filter"}])
+
+    def policy(state: dict, questions: dict) -> tuple:
+        return ("click_item", FILTER) if state.get("current_focus") and not state["previous_actions"] else ("done", None)
+
+    state = drive(world, policy, goal=SHOP_GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path, writer=writer)
+
+    assert [h.outcome for h in state.handoffs] == ["done"]
+    assert state.outcome == "done" and state.answer.achieved
+    assert world.page.name == "filtered"
+
+
+def test_l49_a_stall_handed_back_starts_the_new_focus_with_clean_counts(monkeypatch, tmp_path):
+    world = World(
+        [
+            Page(name="home", items=["Dead link", "Tickets"], url="https://example.com/", on={"click:Tickets": "tickets"}),
+            Page(name="tickets", items=["Buy"], url="https://example.com/tickets"),
+        ]
+    )
+    writer = FakeWriter(reviews=[{"focus": "Click 'Tickets'"}])
+
+    def policy(state: dict, questions: dict) -> tuple:
+        if state["browser_active_tab_url"].endswith("/tickets"):
+            return ("done", None)
+        return ("click_item", "Tickets" if state.get("current_focus") else "Dead link")
+
+    state = drive(world, policy, goal=GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path, writer=writer)
+
+    assert [h.outcome for h in state.handoffs] == ["stalled"]
+    assert state.outcome == "done" and world.page.name == "tickets"
+    assert world.log == ["click:Dead link"] * 3 + ["click:Tickets"]
+    resumed = json.loads((tmp_path / "run" / "step-004-answers.json").read_text())
+    assert (resumed["idle_actions"], resumed["repeated_actions"]) == (
+        1,
+        0,
+    )  # the screen had not moved; the count of it began again
+
+
+@pytest.mark.parametrize(("handoffs", "expected"), [(0, 0), (2, 2)])
+def test_l50_the_handing_back_is_bounded(handoffs, expected, monkeypatch, tmp_path):
+    """A writer that always has another focus, and a classifier that takes one action under each and stops."""
+    world = World([Page(name="feed", items=lambda w: [f"Post {w.ticks}", "More"], url="https://example.com/feed")])
+    writer = FakeWriter(reviews=[{"focus": f"Scroll on, round {n}"} for n in range(9)])
+
+    def policy(state: dict, questions: dict) -> tuple:
+        acted_under = len(state["previous_actions"])
+        rounds = int(state["current_focus"][-1]) + 1 if "current_focus" in state else 0
+        return ("scroll_down", None) if acted_under < rounds else ("none", None)
+
+    state = drive(world, policy, goal=GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path, writer=writer, handoffs=handoffs)
+
+    assert len(state.handoffs) == expected
+    assert world.log == ["scroll_down"] * expected
+    assert state.outcome == "nothing helps" and not state.answer.achieved
+    assert len(writer.packets) == expected + 1  # the stop past the budget is still answered, and that answer is final
+
+
+def test_l51_a_stop_on_the_last_step_is_answered_once(monkeypatch, tmp_path):
+    world = shop()
+    writer = FakeWriter(reviews=[{"focus": f"Click the '{FILTER}' filter"}])
+
+    state = drive(world, torn_until_focused, goal=SHOP_GOAL, steps=1, monkeypatch=monkeypatch, tmp_path=tmp_path, writer=writer)
+
+    assert state.outcome == "low confidence"  # not "step limit": the step was spent on a stop, not on an action
+    assert state.handoffs == [] and len(writer.packets) == 1
+
+
+def test_l52_the_run_counts_the_requests_each_model_took(monkeypatch, tmp_path):
+    """A search, typed by the writer and checked by the classifier, then one hand-off on the way to the answer."""
+    app = "https://example.com/app"
+    world = World(
+        [
+            Page(
+                name="app",
+                items=["Search", "Recent"],
+                url=app,
+                field="Search",
+                on={"enter": lambda w: "results" if w.typed.get("Search") == "bruno mars" else None},
+            ),
+            Page(
+                name="results",
+                items=["Search", "Bruno Mars - Sep 25", "Buy"],
+                url=app,
+                field="Search",
+                on={"click:Buy": "checkout"},
+            ),
+            Page(name="checkout", items=["Order summary"], url=app),
+        ]
+    )
+    policy = scripted(("type_text", None), ("press_enter", None), ("none", None), ("click_item", "Buy"), ("done", None))
+    writer = FakeWriter(text="bruno mars", reviews=[{"focus": "Click 'Buy'"}])
+
+    state = drive(
+        world,
+        policy,
+        goal="search for the bruno mars tour and buy a ticket",
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        writer=writer,
+    )
+
+    assert world.page.name == "checkout"
+    # Five decisions and the check of what was typed; the typed text and two readings of a stopped screen.
+    assert state.calls.count == {"classifier": 6, "writer": 3}
+    summary = json.loads((tmp_path / "run" / "run.json").read_text())
+    assert summary["calls"]["classifier"]["calls"] == 6 and summary["calls"]["classifier"]["share"] == 0.667
+    assert summary["calls"]["writer"]["calls"] == 3 and summary["calls"]["writer"]["share"] == 0.333
+    assert "calls: classifier 6 (67%, " in (tmp_path / "run" / "run.log").read_text()
