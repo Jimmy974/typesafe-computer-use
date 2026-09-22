@@ -5,27 +5,49 @@ from __future__ import annotations
 import base64
 import io
 import json
+import os
+import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
 import anthropic
 from PIL import Image
 
-from .config import answer_model, writer_model
+from .config import answer_model, custom_writer_endpoint, writer_base_url, writer_model
 from .dates import now_context
 from .models import Guidance, Item, Screen
 from .perception import near_field
 
+ANSWER_IMAGE_EDGE = 1568  # the longest edge a vision model reads without shrinking the image itself
+PLACEHOLDER_KEY = "not-needed"  # an endpoint you host yourself does not check a key
+
 
 def make_writer() -> anthropic.Anthropic | None:
-    """A client, or None when no Anthropic credentials resolve (the SDK only checks on first request)."""
+    """A client, or None when there is nothing to write with.
+
+    A key only ever goes to the endpoint it belongs to. CLICKER_WRITER_BASE_URL (see
+    config.writer_base_url) is paired with CLICKER_WRITER_API_KEY, or with a placeholder when that
+    is unset, since an endpoint you host yourself checks no key. Otherwise the SDK reads the
+    ANTHROPIC_* key, token, and base URL as it always does.
+    """
+    base_url = writer_base_url()
+    if base_url:
+        key = os.environ.get("CLICKER_WRITER_API_KEY") or PLACEHOLDER_KEY
+        # Proxies differ in which header they read, so the key goes in both. Passing any key at all
+        # also keeps the SDK from adding ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN on its own.
+        return anthropic.Anthropic(base_url=base_url, api_key=key, auth_token=key)
     client = anthropic.Anthropic()
-    if client.api_key or getattr(client, "auth_token", None):
+    if client.api_key or client.auth_token:
         return client
     return None
 
 
-ANSWER_IMAGE_EDGE = 1568  # the longest edge a vision model reads without shrinking the image itself
+def provider(writer: anthropic.Anthropic) -> str:
+    """Where the writer sends its requests, for logging. Credentials and query in the URL are left out."""
+    url = writer.base_url
+    port = f":{url.port}" if url.port else ""
+    where = f"{url.scheme}://{url.host}{port}{url.path.rstrip('/')}"
+    return f"{where}  models: {writer_model()} (writing), {answer_model()} (answering)"
 
 
 def _structured(
@@ -37,27 +59,41 @@ def _structured(
     model: str | None = None,
     image: Image.Image | None = None,
 ) -> dict:
+    schema = {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
     content: list[dict] = [{"type": "text", "text": json.dumps(packet)}]
     if image is not None:
         content.insert(0, _image_block(image))
+    if custom_writer_endpoint():
+        # Anthropic enforces output_config. Another endpoint may ignore it without a word, so the
+        # schema is spelled out in the prompt as well.
+        system = f"{system}\n\nAnswer with a single JSON object and nothing else, matching this schema:\n{json.dumps(schema)}"
     response = writer.messages.create(
         model=model or writer_model(),
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": content}],
-        output_config={
-            "format": {
-                "type": "json_schema",
-                "schema": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": list(properties),
-                    "additionalProperties": False,
-                },
-            }
-        },
+        output_config={"format": {"type": "json_schema", "schema": schema}},
     )
-    return json.loads("".join(b.text for b in response.content if b.type == "text"))
+    return parse_json("".join(b.text for b in response.content if b.type == "text"))
+
+
+def parse_json(text: str) -> dict:
+    """The JSON object out of a reply, as long as one is in there.
+
+    A model that was asked for JSON usually returns exactly that. Some wrap it in code fences or a
+    sentence, so the object itself is looked for rather than assumed to fill the whole reply.
+    """
+    stripped = text.strip()
+    fenced = re.search(r"```(?:json)?\s*(.+?)\s*```", stripped, re.DOTALL)
+    if fenced:
+        stripped = fenced.group(1).strip()
+    start, end = stripped.find("{"), stripped.rfind("}")
+    if start != -1 and end > start:
+        stripped = stripped[start : end + 1]
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"the writer answered without usable JSON: {text[:400]!r}") from e
 
 
 def _image_block(image: Image.Image) -> dict:

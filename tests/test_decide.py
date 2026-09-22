@@ -128,6 +128,14 @@ def test_a_duplicated_label_names_its_row_and_a_unique_one_does_not(screen, make
     assert rows[5]["beside"] == ["Coldplay", "Oct 2"] and "beside" not in rows[3]
 
 
+def test_a_control_parked_far_off_the_display_still_gets_a_region(screen, make_item):
+    above = make_item(0, "note row", x1=100, y1=-98_000, x2=400, y2=-97_970)
+    below = make_item(1, "scrolled link", x1=3_000, y1=5_000, x2=3_400, y2=5_030)
+
+    assert screen.region(above) == "top-left"
+    assert screen.region(below) == "bottom-right"
+
+
 def test_guidance_reaches_the_state_only_when_there_is_some(screen, make_item):
     items = [make_item(0, "Buy")]
     guided = Guidance().heard("13 or 15 inch?", "15").focused("Click '15 inch'")
