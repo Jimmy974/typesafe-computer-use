@@ -138,6 +138,8 @@ def test_a_custom_endpoint_is_told_the_schema_in_the_prompt(clean_env, endpoint)
     # Metered, as the runner hands it out.
     assert compose_url(MeteredWriter(make_writer(), Calls()), "open example", []) == "https://example.com"
     assert '"required": ["ok", "url", "reason"]' in endpoint.seen[0]["body"]["system"]
+    # Thinking on by default would spend the whole 200-token budget and leave no text.
+    assert endpoint.seen[0]["body"]["thinking"] == {"type": "disabled"}
 
 
 @pytest.mark.parametrize(
@@ -167,6 +169,7 @@ def test_anthropic_itself_gets_the_schema_only_through_output_config(clean_env, 
     monkeypatch.setattr(writer.messages, "create", create)
     compose_url(writer, "open example", [])
     assert "schema" not in sent["system"]
+    assert "thinking" not in sent
     assert sent["output_config"]["format"]["schema"]["required"] == ["ok", "url", "reason"]
 
 

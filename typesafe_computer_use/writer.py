@@ -63,16 +63,21 @@ def _structured(
     content: list[dict] = [{"type": "text", "text": json.dumps(packet)}]
     if image is not None:
         content.insert(0, _image_block(image))
+    extra: dict = {}
     if custom_writer_endpoint():
         # Anthropic enforces output_config. Another endpoint may ignore it without a word, so the
         # schema is spelled out in the prompt as well.
         system = f"{system}\n\nAnswer with a single JSON object and nothing else, matching this schema:\n{json.dumps(schema)}"
+        # Another endpoint may think by default, out of the same max_tokens: a 200-token call then
+        # comes back with no text at all. Anthropic thinks only when asked.
+        extra["thinking"] = {"type": "disabled"}
     response = writer.messages.create(
         model=model or writer_model(),
         max_tokens=max_tokens,
         system=system,
         messages=[{"role": "user", "content": content}],
         output_config={"format": {"type": "json_schema", "schema": schema}},
+        **extra,
     )
     return parse_json("".join(b.text for b in response.content if b.type == "text"))
 
