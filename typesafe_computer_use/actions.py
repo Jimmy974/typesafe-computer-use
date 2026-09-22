@@ -31,6 +31,7 @@ class Context:
 
 
 def perform(decision: Decision, screen: Screen, items: list[Item], ctx: Context) -> str:
+    desktop.check_abort()
     key = decision.chosen
     by_index = {str(it.index): it for it in items}
     if key in by_index:
@@ -102,6 +103,18 @@ def fill_field(field: Field, text: str) -> str:
     return "via keystrokes"
 
 
+def restore_field(field: Field, typed: str) -> bool:
+    """Undo only our write, through the original element, never through the current focus.
+
+    If the element disappeared or its value changed again, leave it alone. A failed AX restore
+    has no keyboard fallback: Select All/Delete could destroy an unrelated field's contents.
+    """
+    ref = field.ref
+    if ref is None or desktop.ax_value(ref) != typed:
+        return False
+    return desktop.ax_set_value(ref, field.value) and desktop.ax_value(ref) == field.value
+
+
 def _use_browser(decision: Decision, screen, items, ctx: Context) -> str:
     """Go to the browser, and open the website the site answer named.
 
@@ -151,8 +164,8 @@ def _type_text(decision, screen: Screen, items, ctx: Context) -> str:
     time.sleep(0.3)
     p = verify_typed(ctx.typesafe, ctx.goal, screen.field, text, desktop.focused_field())
     if p < VERIFY_THRESHOLD:
-        desktop.clear_field()
-        return f"typed {text!r} into {screen.field.label!r} {how} but verification failed ({p:.2f}); cleared it"
+        recovery = "restored previous value" if restore_field(screen.field, text) else "could not safely restore previous value"
+        return f"typed {text!r} into {screen.field.label!r} {how} but verification failed ({p:.2f}); {recovery}"
     return f"typed {text!r} into {screen.field.label!r} {how} (verified {p:.2f})"
 
 

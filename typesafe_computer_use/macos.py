@@ -10,6 +10,8 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 import ApplicationServices as AS
@@ -57,26 +59,47 @@ def _post(event) -> None:
     time.sleep(0.04)
 
 
+def _down_then_up(event: Callable[[bool], object]) -> None:
+    """Post the down event, then the up event even when the down is interrupted, so nothing stays held."""
+    try:
+        _post(event(True))
+    finally:
+        _post(event(False))
+
+
 def click_at(point: tuple[float, float]) -> None:
-    for kind in (Quartz.kCGEventMouseMoved, Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp):
-        _post(Quartz.CGEventCreateMouseEvent(None, kind, point, Quartz.kCGMouseButtonLeft))
+    # Check before moving: the synthetic move would otherwise take the pointer out of the abort corner.
+    check_abort()
+    _post(Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, point, Quartz.kCGMouseButtonLeft))
+    check_abort()
+    kinds = {True: Quartz.kCGEventLeftMouseDown, False: Quartz.kCGEventLeftMouseUp}
+    _down_then_up(lambda down: Quartz.CGEventCreateMouseEvent(None, kinds[down], point, Quartz.kCGMouseButtonLeft))
 
 
 def press(key: str, command: bool = False) -> None:
+    check_abort()
     code = KEYCODES[key]
-    for down in (True, False):
-        event = Quartz.CGEventCreateKeyboardEvent(None, code, down)
+
+    def event(down: bool):
+        e = Quartz.CGEventCreateKeyboardEvent(None, code, down)
         if command:
-            Quartz.CGEventSetFlags(event, Quartz.kCGEventFlagMaskCommand)
-        _post(event)
+            Quartz.CGEventSetFlags(e, Quartz.kCGEventFlagMaskCommand)
+        return e
+
+    _down_then_up(event)
+
+
+def _unicode_key(ch: str, down: bool):
+    event = Quartz.CGEventCreateKeyboardEvent(None, 0, down)
+    Quartz.CGEventKeyboardSetUnicodeString(event, len(ch), ch)
+    return event
 
 
 def type_text(text: str) -> None:
+    """One character at a time, checking the abort corner before each."""
     for ch in text:
-        for down in (True, False):
-            event = Quartz.CGEventCreateKeyboardEvent(None, 0, down)
-            Quartz.CGEventKeyboardSetUnicodeString(event, len(ch), ch)
-            _post(event)
+        check_abort()
+        _down_then_up(partial(_unicode_key, ch))
 
 
 def clear_field() -> None:
@@ -87,6 +110,7 @@ def clear_field() -> None:
 def scroll(lines: int) -> None:
     """Scroll events go to the view under the cursor, so park it over the frontmost window first."""
     center = frontmost_window_center()
+    check_abort()
     if center is not None:
         _post(Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, center, Quartz.kCGMouseButtonLeft))
     _post(Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitLine, 1, lines))
@@ -117,18 +141,22 @@ def frontmost_pid() -> int:
 
 def activate(app: str, timeout: float = 3.0) -> bool:
     """Bring an app to the front and confirm it got there."""
+    check_abort()
     osascript(f'tell application "{app}" to activate')
     end = time.monotonic() + timeout
     while time.monotonic() < end:
+        check_abort()
         if frontmost_app() == app:
             return True
         time.sleep(0.1)
+    check_abort()
     osascript(f'tell application "System Events" to set frontmost of process "{app}" to true')
     time.sleep(0.3)
     return frontmost_app() == app
 
 
 def open_url(browser: str, url: str) -> bool:
+    check_abort()
     osascript(f'tell application "{browser}" to open location "{url}"')
     return activate(browser)
 
@@ -233,6 +261,7 @@ def focused_field() -> Field | None:
 
 def ax_press(ref) -> bool:
     """Send AXPress to an element."""
+    check_abort()
     try:
         return AS.AXUIElementPerformAction(ref, AX_PRESS) == 0
     except Exception:
@@ -241,6 +270,7 @@ def ax_press(ref) -> bool:
 
 def ax_focus(ref) -> bool:
     """Give an element the keyboard focus."""
+    check_abort()
     try:
         return AS.AXUIElementSetAttributeValue(ref, AS.kAXFocusedAttribute, True) == 0
     except Exception:
@@ -249,6 +279,7 @@ def ax_focus(ref) -> bool:
 
 def ax_set_value(ref, text: str) -> bool:
     """Write an element's value. A read-only or unwilling element reports an error."""
+    check_abort()
     try:
         return AS.AXUIElementSetAttributeValue(ref, AS.kAXValueAttribute, text) == 0
     except Exception:

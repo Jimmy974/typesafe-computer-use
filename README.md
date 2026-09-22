@@ -149,9 +149,12 @@ uv run clicker-inspect "any goal"                    # 3-2-1, capture, open the 
 Clear the terminal first. It is on screen, so its text is OCR input.
 
 **Stopping a live run.** Ctrl-C when the terminal has focus, or slam the mouse into the
-top-left corner of the screen from any app. The loop also stops itself on `done` or
-`none`, on confidence under `--min-confidence` (0.4), when it stalls, or at `--steps`. Each
-of those stops goes to the writer, which answers and may hand the run back (below).
+top-left corner of the screen from any app. The corner is checked before every click, key,
+scroll, app switch and accessibility action, and between typed characters, so a run stops
+mid-word. A key or mouse button goes back up even when Ctrl-C lands between its down and
+its up. The loop also stops itself on `done` or `none`, on confidence under
+`--min-confidence` (0.4), when it stalls, or at `--steps`. Each of those stops goes to the
+writer, which answers and may hand the run back (below).
 
 **Stalls.** Nothing in an action's description says what came of it; only the next capture
 does. So each step keeps a signature of the screen (the app, the page, the text on it) and
@@ -422,7 +425,11 @@ the user said, once there are any:
   fields come back `fill: false` and nothing is typed. The text is set as the field's
   value where the element accepts one; otherwise the field is emptied and the text
   typed, since keystrokes land after whatever it already holds. After typing, a Noul
-  scores whether the field now holds a sensible value. Under 0.5 the field is cleared.
+  scores whether the field now holds a sensible value. Under 0.5 the field gets back
+  the value it had before, set through the same element, and only while it still holds
+  exactly the text just typed. When the element refuses the value, is gone, or holds
+  something else by then, the unverified text stays in the field and the history line
+  says so. Recovery never presses keys: the focus may have moved to another field.
 - **`use_browser`** with `site: other` receives the goal and returns `{ok, url}`.
   Code rejects anything that is not a clean https URL with a hostname.
 - **The answer**, each time the classifier stops. It receives the goal, every action

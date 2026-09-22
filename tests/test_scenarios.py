@@ -472,19 +472,9 @@ def test_l18_the_step_limit_ends_an_endless_list(monkeypatch, tmp_path):
     assert world.log == ["scroll_down"] * 3
 
 
-def test_l19_typing_that_fails_verification_is_cleared(monkeypatch, tmp_path):
-    world = World(
-        [
-            Page(
-                name="search",
-                items=["Search", "Popular tours"],
-                url="https://example.com/",
-                field="Search",
-                on={"enter": "results"},
-            ),
-            Page(name="results", items=["First result", "Second result"], url="https://example.com/results"),
-        ]
-    )
+def test_l19_typing_that_fails_verification_gives_the_field_its_old_value_back(monkeypatch, tmp_path):
+    world = World([Page(name="search", items=["Search", "Popular tours"], url="https://example.com/", field="Search")])
+    world.typed["Search"] = "old query"
     policy = scripted(("type_text", None), ("done", None))
 
     state = drive(
@@ -498,10 +488,10 @@ def test_l19_typing_that_fails_verification_is_cleared(monkeypatch, tmp_path):
     )
 
     assert state.outcome == "done"
-    assert "verification failed" in state.history[0] and "cleared it" in state.history[0]
-    assert "Search" not in world.typed  # the field was cleared, so nothing was left behind
-    assert world.log == ["type:bruno mars tour", "clear_field"]
-    assert world.page.name == "search"
+    assert "verification failed" in state.history[0] and "restored previous value" in state.history[0]
+    assert world.typed["Search"] == "old query"
+    # Set through the element both ways: no Select All and Delete, which go wherever the focus is now.
+    assert world.log == ["type:bruno mars tour", "type:old query"]
 
 
 def steering_policy(state: dict, questions: dict) -> tuple:
@@ -1703,3 +1693,26 @@ def test_l52_the_run_counts_the_requests_each_model_took(monkeypatch, tmp_path):
     assert summary["calls"]["classifier"]["calls"] == 6 and summary["calls"]["classifier"]["share"] == 0.667
     assert summary["calls"]["writer"]["calls"] == 3 and summary["calls"]["writer"]["share"] == 0.333
     assert "calls: classifier 6 (67%, " in (tmp_path / "run" / "run.log").read_text()
+
+
+def test_l53_unverified_keystrokes_stay_when_the_field_will_not_take_a_value(monkeypatch, tmp_path):
+    world = World(
+        [Page(name="search", items=["Search", "Popular tours"], url="https://example.com/", field="Search", no_ax_value=True)]
+    )
+    world.typed["Search"] = "old query"
+    policy = scripted(("type_text", None), ("done", None))
+
+    state = drive(
+        world,
+        policy,
+        goal="search for the bruno mars tour",
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        writer=FakeWriter(text="bruno mars tour"),
+        noul=0.2,
+    )
+
+    assert state.outcome == "done"
+    assert "via keystrokes" in state.history[0] and "could not safely restore previous value" in state.history[0]
+    assert world.typed["Search"] == "bruno mars tour"  # left for the next step to see, not erased blind
+    assert world.log == ["clear_field", "type:bruno mars tour"]  # emptied before typing, never after

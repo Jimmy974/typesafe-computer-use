@@ -247,3 +247,42 @@ def test_clicking_a_duplicated_label_says_which_row(screen, calls):
     assert actions.perform(clicking("3"), screen, items, None) == "clicked 'Buy' beside 'Adele'"
     assert actions.perform(clicking("4"), screen, items, None) == "clicked 'Terms'"
     assert [point for kind, point in calls if kind == "click"] == [(225.0, 137.5), (100.0, 167.5)]
+
+
+def test_failed_verification_restores_original_field_without_touching_new_focus(screen, monkeypatch):
+    original = field(ref=object(), value="previous query")
+    other = field(ref=object(), value="important draft")
+    values = {original.ref: "new query", other.ref: other.value}
+    monkeypatch.setattr(actions, "compose_text", lambda *a: "new query")
+    monkeypatch.setattr(actions, "fill_field", lambda *a: "via accessibility")
+    monkeypatch.setattr(actions.time, "sleep", lambda *a: None)
+    monkeypatch.setattr(desktop, "focused_field", lambda: other)
+    monkeypatch.setattr(actions, "verify_typed", lambda *a: 0.0)
+    monkeypatch.setattr(desktop, "ax_value", values.get)
+    monkeypatch.setattr(desktop, "ax_set_value", lambda ref, text: values.__setitem__(ref, text) or True)
+    monkeypatch.setattr(desktop, "clear_field", lambda: pytest.fail("must not clear the current focus"))
+
+    result = actions._type_text(None, replace(screen, field=original), [], context(object()))
+
+    assert "restored previous value" in result
+    assert values == {original.ref: original.value, other.ref: other.value}
+
+
+@pytest.mark.parametrize("current", [None, "user edited the value", "prefix new query"])
+def test_recovery_leaves_a_missing_or_changed_original_field_alone(current, monkeypatch):
+    monkeypatch.setattr(desktop, "ax_value", lambda ref: current)
+    monkeypatch.setattr(desktop, "ax_set_value", lambda *a: pytest.fail("not our value anymore"))
+    assert not actions.restore_field(field(ref=object()), "new query")
+
+
+def test_recovery_without_a_handle_never_uses_keyboard_input(monkeypatch):
+    monkeypatch.setattr(desktop, "clear_field", lambda: pytest.fail("unknown target"))
+    monkeypatch.setattr(desktop, "type_text", lambda *a: pytest.fail("unknown target"))
+    assert not actions.restore_field(field(), "new query")
+
+
+def test_refused_restore_has_no_keyboard_fallback(monkeypatch):
+    monkeypatch.setattr(desktop, "ax_value", lambda ref: "new query")
+    monkeypatch.setattr(desktop, "ax_set_value", lambda *a: False)
+    monkeypatch.setattr(desktop, "clear_field", lambda: pytest.fail("must not clear the current focus"))
+    assert not actions.restore_field(field(ref=object()), "new query")
