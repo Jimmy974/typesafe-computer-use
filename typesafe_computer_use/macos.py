@@ -155,6 +155,25 @@ def activate(app: str, timeout: float = 3.0) -> bool:
     return frontmost_app() == app
 
 
+APP_FOLDERS = (
+    Path("/Applications"),
+    Path("/Applications/Utilities"),
+    Path("/System/Applications"),
+    Path("/System/Applications/Utilities"),
+    Path.home() / "Applications",
+)
+
+
+def installed_apps() -> list[str]:
+    """Names of the apps in the standard folders, as `activate` takes them: it launches one that is not running.
+
+    One level deep, so an app's helper bundles stay out. A name with a quote or a backslash would
+    break out of the AppleScript string `activate` builds, so it is left out rather than escaped.
+    """
+    names = {path.stem for folder in APP_FOLDERS if folder.is_dir() for path in folder.glob("*.app")}
+    return sorted((n for n in names if '"' not in n and "\\" not in n), key=str.lower)
+
+
 def open_url(browser: str, url: str) -> bool:
     check_abort()
     osascript(f'tell application "{browser}" to open location "{url}"')

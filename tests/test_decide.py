@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from typesafe_computer_use.config import SITES
 from typesafe_computer_use.decide import (
     Decision,
+    app_criteria,
     base_state,
     item_criteria,
     kind_criteria,
@@ -145,3 +146,22 @@ def test_guidance_reaches_the_state_only_when_there_is_some(screen, make_item):
     assert state["current_focus"] == "Click '15 inch'"
     assert state["user_said"] == [{"asked": "13 or 15 inch?", "replied": "15"}]
     assert list(state)[:3] == ["goal", "current_focus", "user_said"]  # beside the goal they refine
+
+
+def test_kind_criteria_offers_open_app_only_when_there_are_apps_to_open():
+    assert "open_app" not in kind_criteria("Google Chrome", None)
+    assert "open_app" in kind_criteria("Google Chrome", None, apps=True)
+
+
+def test_app_criteria_keys_each_app_by_its_position():
+    assert app_criteria(["Calculator", "Notes"]) == {"0": "the Calculator app", "1": "the Notes app"}
+
+
+def test_decision_open_app_takes_the_lower_of_kind_and_app_confidence():
+    d = Decision(kind=answer("open_app", 0.9), item=None, site=answer("none", 1.0), app=answer("4", 0.3))
+    assert d.opening_app and d.chosen == "open_app" and d.confidence == 0.3 and not d.stops
+
+
+def test_decision_ignores_the_app_answer_unless_opening_an_app():
+    d = Decision(kind=answer("press_escape", 0.8), item=None, site=answer("none", 1.0), app=answer("4", 0.1))
+    assert not d.opening_app and d.confidence == 0.8

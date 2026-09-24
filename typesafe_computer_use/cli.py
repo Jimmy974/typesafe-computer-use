@@ -87,6 +87,9 @@ def main(argv: list[str] | None = None) -> None:
         url=args.url,
     )
 
+    # The browser is use_browser's, so it is not offered twice. The rest of the options go to the item question.
+    apps = tuple(app for app in desktop.installed_apps() if app != config.browser())[: config.MAX_OPTIONS]
+
     def ctx_factory(typesafe, history):
         return Context(
             goal=args.goal,
@@ -96,6 +99,7 @@ def main(argv: list[str] | None = None) -> None:
             writer=writer,
             history=history,
             ask=ask_user if sys.stdin.isatty() else None,
+            apps=apps,
         )
 
     state = run(cfg, ctx_factory)

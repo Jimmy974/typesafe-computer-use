@@ -28,6 +28,7 @@ class Context:
     history: list[str]
     ask: Callable[[str], str] | None = None  # puts the writer's question to the user; None when nobody is there to answer
     guidance: Guidance = field(default_factory=Guidance)  # the runner replaces the context when the writer or the user adds to it
+    apps: tuple[str, ...] = ()  # what open_app may start; the app question answers with a position in it
 
 
 def perform(decision: Decision, screen: Screen, items: list[Item], ctx: Context) -> str:
@@ -142,6 +143,18 @@ def _use_browser(decision: Decision, screen, items, ctx: Context) -> str:
     return f"use_browser failed: opened {url} but {ctx.browser} did not come to the front"
 
 
+def _open_app(decision: Decision, screen, items, ctx: Context) -> str:
+    """Start the app the app answer named, or bring it forward if it is running. Only a name from
+    the list goes to the platform: the classifier picks a position, never writes a name."""
+    key = decision.app.choice if decision.app is not None else ""
+    if not (key.isdigit() and int(key) < len(ctx.apps)):
+        return f"open_app refused: there is no app {key!r}"
+    app = ctx.apps[int(key)]
+    if desktop.activate(app):
+        return f"opened {app}"
+    return f"open_app failed: {app} did not come to the front"
+
+
 def _type_email(decision, screen: Screen, items, ctx: Context) -> str:
     if not (screen.field and screen.field.is_text):
         return "type_email refused: no text field is focused"
@@ -193,6 +206,7 @@ def _wait(decision, screen, items, ctx) -> str:
 
 _HANDLERS = {
     "use_browser": _use_browser,
+    "open_app": _open_app,
     "type_email": _type_email,
     "type_text": _type_text,
     "press_enter": _key("return", "pressed Return"),

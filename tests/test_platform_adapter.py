@@ -46,3 +46,14 @@ def test_macos_is_the_adapter_off_windows():
 
 def test_windows_presses_every_key_macos_presses():
     assert set(macos.KEYCODES) <= set(windows.VK)
+
+
+def test_installed_apps_lists_bundles_one_level_deep_and_drops_unsafe_names(tmp_path, monkeypatch):
+    for name in ("Calculator.app", "zoom.us.app", 'Bad"Name.app', "Folder/Helper.app", "notes.txt"):
+        (tmp_path / name).mkdir(parents=True)
+    monkeypatch.setattr(macos, "APP_FOLDERS", (tmp_path, tmp_path / "missing"))
+    assert macos.installed_apps() == ["Calculator", "zoom.us"]
+
+
+def test_windows_offers_no_app_to_open():
+    assert windows.installed_apps() == []

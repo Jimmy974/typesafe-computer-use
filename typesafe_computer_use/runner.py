@@ -264,11 +264,14 @@ def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
     prefix = cfg.out / f"step-{step:03d}"  # three digits, so a run of 100 steps still lists in order
     screen.image.save(prefix.with_name(prefix.name + "-raw.png"))
     prefix.with_name(prefix.name + "-payload.txt").write_text(
-        render_payload(cfg.goal, screen, items, state.history, ctx.browser, ctx.email, tried, ctx.guidance), encoding="utf-8"
+        render_payload(cfg.goal, screen, items, state.history, ctx.browser, ctx.email, tried, ctx.guidance, ctx.apps),
+        encoding="utf-8",
     )
 
     with phase(timing, "decide"):
-        decision = decide(ctx.typesafe, cfg.goal, screen, items, state.history, ctx.browser, ctx.email, tried, ctx.guidance)
+        decision = decide(
+            ctx.typesafe, cfg.goal, screen, items, state.history, ctx.browser, ctx.email, tried, ctx.guidance, ctx.apps
+        )
     by_index = {str(it.index): it for it in items}
     annotate(screen, items, decision.chosen, prefix.with_suffix(".png"))
 
@@ -288,6 +291,10 @@ def run_step(cfg: RunConfig, ctx: Context, state: RunState, step: int, log: Log)
         log(f"  offscreen ({decision.offscreen.confidence:.2f}):")
         for key, p in top(decision.offscreen, 3):
             log(f"  {p:5.2f}  [{key}] {screen.offscreen[int(key)].label!r}")
+    if decision.opening_app:
+        log(f"  app ({decision.app.confidence:.2f}):")
+        for key, p in top(decision.app, 3):
+            log(f"  {p:5.2f}  [{key}] {ctx.apps[int(key)]!r}")
 
     keep_going = resolve(cfg, ctx, state, screen, items, decision, timing, log)
     timing.setdefault("act", 0.0)
@@ -397,6 +404,8 @@ def answers(
         "offscreen": decision.offscreen.choice if decision.offscreen else None,
         "offscreen_probabilities": decision.offscreen.probabilities if decision.offscreen else None,
         "offscreen_controls": offscreen_records(screen.offscreen),
+        "open_app": decision.app.choice if decision.app else None,
+        "open_app_probabilities": decision.app.probabilities if decision.app else None,
         "chosen": decision.chosen,
         "confidence": decision.confidence,
         "already_tried_on_this_screen": tried,

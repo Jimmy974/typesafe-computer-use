@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 from PIL import ImageDraw, ImageFont
 
-from .decide import base_state, item_criteria, kind_criteria, offscreen_criteria, site_criteria
+from .decide import app_criteria, base_state, item_criteria, kind_criteria, offscreen_criteria, site_criteria
 from .models import Guidance, Item, Screen
 
 FONT_PATH = "/System/Library/Fonts/Helvetica.ttc"
@@ -45,6 +46,7 @@ def render_payload(
     email: str | None,
     tried: list[str] | None = None,
     guidance: Guidance | None = None,
+    apps: Sequence[str] = (),
 ) -> str:
     """Exactly what goes to TypeSafe for this screen, plus a table of every item."""
     parts = [
@@ -56,7 +58,7 @@ def render_payload(
         RULE,
         "QUESTION kind  (Choice criteria)",
         RULE,
-        json.dumps(kind_criteria(browser, email, bool(screen.offscreen)), indent=2),
+        json.dumps(kind_criteria(browser, email, bool(screen.offscreen), bool(apps)), indent=2),
         "",
         RULE,
         "QUESTION item  (Choice criteria)",
@@ -75,6 +77,14 @@ def render_payload(
             "QUESTION offscreen  (Choice criteria)",
             RULE,
             json.dumps(offscreen_criteria(screen.offscreen), indent=2),
+            "",
+        ]
+    if apps:
+        parts += [
+            RULE,
+            "QUESTION app  (Choice criteria)",
+            RULE,
+            json.dumps(app_criteria(apps), indent=2),
             "",
         ]
     parts += [

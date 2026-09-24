@@ -286,3 +286,25 @@ def test_refused_restore_has_no_keyboard_fallback(monkeypatch):
     monkeypatch.setattr(desktop, "ax_set_value", lambda *a: False)
     monkeypatch.setattr(desktop, "clear_field", lambda: pytest.fail("must not clear the current focus"))
     assert not actions.restore_field(field(ref=object()), "new query")
+
+
+def opening(key: str) -> SimpleNamespace:
+    return SimpleNamespace(chosen="open_app", app=SimpleNamespace(choice=key))
+
+
+def test_open_app_activates_the_app_the_answer_names(screen, browser):
+    ctx = replace(context(), apps=("Calculator", "Notes"))
+    assert actions.perform(opening("1"), screen, [], ctx) == "opened Notes"
+    assert browser == [("activate", "Notes")]
+
+
+def test_open_app_refuses_a_position_outside_the_list(screen, browser):
+    ctx = replace(context(), apps=("Calculator",))
+    assert actions.perform(opening("3"), screen, [], ctx) == "open_app refused: there is no app '3'"
+    assert browser == []
+
+
+def test_open_app_reports_an_app_that_did_not_come_forward(screen, monkeypatch):
+    monkeypatch.setattr(desktop, "activate", lambda app: False)
+    ctx = replace(context(), apps=("Calculator",))
+    assert actions.perform(opening("0"), screen, [], ctx) == "open_app failed: Calculator did not come to the front"

@@ -355,6 +355,12 @@ def activate(app: str, timeout: float = 3.0) -> bool:
     return win32gui.GetForegroundWindow() == hwnd
 
 
+def installed_apps() -> list[str]:
+    """None: `activate` here finds a window that is already open and launches nothing, so no app is
+    offered to open and the classifier never sees the action."""
+    return []
+
+
 def open_url(browser: str, url: str) -> bool:
     exe = next((exe for name, exe in BROWSER_EXES.items() if name.lower() == browser.strip().lower()), None)
     if exe and shutil.which(exe):

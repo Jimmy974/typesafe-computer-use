@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from typesafe_sdk import Choice, ChoiceAnswer, Noul, TypeSafeClient
@@ -17,6 +18,12 @@ PRESS_OFFSCREEN = (
     "Activate a labelled control that the app exposes but that is not currently visible on screen "
     "(chosen in the offscreen question). Use when the needed control is known to exist but is "
     "scrolled out of view or not yet shown."
+)
+
+OPEN_APP = (
+    "Open an app on this computer, or bring it to the front if it is already running (chosen in the "
+    "app question). This is the only way to start an app: never look for it in the Dock, Finder, "
+    "Launchpad, or Spotlight. Not for the browser, which use_browser covers."
 )
 
 # Said only while a focus is set, so a run the writer never steered asks the question it always asked.
@@ -59,11 +66,12 @@ def fixed_actions(browser: str, email: str | None) -> dict[str, str]:
     return actions
 
 
-def kind_criteria(browser: str, email: str | None, offscreen: bool = False) -> dict[str, str]:
+def kind_criteria(browser: str, email: str | None, offscreen: bool = False, apps: bool = False) -> dict[str, str]:
     clicks = {"click_item": "Click one of the on-screen text items (chosen in the item question)."}
     if offscreen:
         clicks["press_offscreen"] = PRESS_OFFSCREEN
-    return {**clicks, **fixed_actions(browser, email)}
+    opening = {"open_app": OPEN_APP} if apps else {}
+    return {**clicks, **opening, **fixed_actions(browser, email)}
 
 
 ROW_MATES = 3  # how many neighbours name a duplicated item's row in a criterion; the history line takes them all
@@ -112,6 +120,11 @@ def offscreen_criteria(nodes: list[AxNode]) -> dict[str, str]:
 def offscreen_records(nodes: list[AxNode]) -> list[dict]:
     """The same controls as state, with the key the offscreen question answers with."""
     return [{"k": i, "role": node.role_word, "label": node.label} for i, node in enumerate(nodes)]
+
+
+def app_criteria(apps: Sequence[str]) -> dict[str, str]:
+    """Each app open_app can start, keyed by its position in `apps`: a name is not a safe key, a number is."""
+    return {str(i): f"the {name} app" for i, name in enumerate(apps)}
 
 
 def site_criteria() -> dict[str, str]:
@@ -166,6 +179,7 @@ class Decision:
     item: ChoiceAnswer | None
     site: ChoiceAnswer
     offscreen: ChoiceAnswer | None = None
+    app: ChoiceAnswer | None = None
 
     @property
     def clicking(self) -> bool:
@@ -174,6 +188,10 @@ class Decision:
     @property
     def pressing_offscreen(self) -> bool:
         return self.kind.choice == "press_offscreen" and self.offscreen is not None
+
+    @property
+    def opening_app(self) -> bool:
+        return self.kind.choice == "open_app" and self.app is not None
 
     @property
     def chosen(self) -> str:
@@ -186,13 +204,15 @@ class Decision:
     @property
     def confidence(self) -> float:
         # Only the answers that name a target lower the confidence: a click or a press lands
-        # somewhere, and the wrong somewhere is not undone. use_browser reads the site answer too,
-        # but every outcome of it is a page the next step can leave, so a split there must not
-        # stop the run.
+        # somewhere, and the wrong somewhere is not undone, and an app once launched is running.
+        # use_browser reads the site answer too, but every outcome of it is a page the next step
+        # can leave, so a split there must not stop the run.
         if self.clicking:
             return min(self.kind.confidence, self.item.confidence)
         if self.pressing_offscreen:
             return min(self.kind.confidence, self.offscreen.confidence)
+        if self.opening_app:
+            return min(self.kind.confidence, self.app.confidence)
         return self.kind.confidence
 
     @property
@@ -210,6 +230,7 @@ def decide(
     email: str | None,
     tried: list[str] | None = None,
     guidance: Guidance | None = None,
+    apps: Sequence[str] = (),
 ) -> Decision:
     questions = {
         "kind": Choice(
@@ -220,7 +241,7 @@ def decide(
                 "tried on this screen: each of those led straight back here."
                 + (FOCUS_RULE if guidance and guidance.focus else "")
             ),
-            criteria=kind_criteria(browser, email, bool(screen.offscreen)),
+            criteria=kind_criteria(browser, email, bool(screen.offscreen), bool(apps)),
         ),
         "site": Choice(
             instructions=(
@@ -249,8 +270,19 @@ def decide(
             ),
             criteria=offscreen_criteria(screen.offscreen),
         )
+    if apps:
+        questions["app"] = Choice(
+            instructions="If an app is opened this step, which app? Name the one the goal needs to work in.",
+            criteria=app_criteria(apps),
+        )
     answers = client.system_one(state=base_state(goal, screen, items, history, tried, guidance), questions=questions).answers
-    return Decision(kind=answers["kind"], item=answers.get("item"), site=answers["site"], offscreen=answers.get("offscreen"))
+    return Decision(
+        kind=answers["kind"],
+        item=answers.get("item"),
+        site=answers["site"],
+        offscreen=answers.get("offscreen"),
+        app=answers.get("app"),
+    )
 
 
 def verify_typed(client: TypeSafeClient, goal: str, field_before: Field, typed: str, field_after: Field | None) -> float:
