@@ -192,6 +192,26 @@ def observe_until_changed(
     return page, (time.perf_counter() - start) * 1000, False
 
 
+def settle(session: Session, limit_ms: int, *, quiet_ms: int = 300, poll_ms: int = 50, budget: int = 120) -> Page:
+    """Perceive until the page has held still for `quiet_ms`, or `limit_ms` has passed. Returns the last page.
+
+    For a site that renders in stages, where the first change after a click is the tab
+    repainting and the new page arrives a moment later. A page that is already still costs
+    `quiet_ms`; a page that never settles costs `limit_ms` and is handed over as it stands.
+    """
+    deadline = time.perf_counter() + limit_ms / 1000
+    page = perceive(session, budget=budget)
+    still_since = time.perf_counter()
+    while time.perf_counter() < deadline:
+        time.sleep(poll_ms / 1000)
+        now = perceive(session, budget=budget)
+        if fingerprint(now) != fingerprint(page):
+            page, still_since = now, time.perf_counter()
+        elif (time.perf_counter() - still_since) * 1000 >= quiet_ms:
+            break
+    return page
+
+
 def go_back(session: Session) -> str:
     session.evaluate("history.back(); true")
     return "back"

@@ -22,6 +22,7 @@ from pathlib import Path
 
 from typesafe_sdk import TypeSafeClient
 
+from ..sites import Site, site_for
 from ..writer import Writer, compose_browser_text, compose_url, looks_credential
 from . import act
 from .decide import Decision, available_actions, decide, field_context, verify_typed
@@ -151,6 +152,7 @@ def run_goal(
     model: str | None = None,
     writer: Writer | None = None,
     runfolder: RunFolder | None = None,
+    sites: list[Site] | None = None,
 ) -> RunResult:
     result = RunResult(goal=goal, url=str(session.evaluate("location.href") or ""), outcome="incomplete")
     if start_url:
@@ -174,6 +176,7 @@ def run_goal(
             page, perceive_ms = pending, 0.0
             pending = None
 
+        site = site_for(page.url, sites or [])
         # Typing and opening an address need free text, which only the writer composes.
         can_write = writer is not None
         action_criteria = available_actions(page, allow_type=allow_type, can_write=can_write)
@@ -188,6 +191,7 @@ def run_goal(
             allow_type=allow_type,
             can_write=can_write,
             model=model,
+            site_notes=site.notes if site else (),
         )
         decide_ms = (time.perf_counter() - t0) * 1000
 
@@ -274,6 +278,13 @@ def run_goal(
             # The wait for this action and the observation for the next decision
             # are the same call, so this costs nothing extra.
             next_page, _, changed = act.observe_until_changed(session, fp_before, timeout_ms=change_timeout_ms)
+            if site and site.settle_ms:
+                # A staged site may not answer within the usual window, and its first change is often
+                # the tab repainting, not the new page: wait longer for a change, then for it to finish.
+                if not changed:
+                    next_page, _, changed = act.observe_until_changed(session, fp_before, timeout_ms=site.settle_ms)
+                if changed:
+                    next_page = act.settle(session, site.settle_ms)
             pending = next_page
         act_ms = (time.perf_counter() - t0) * 1000
 

@@ -18,6 +18,9 @@ from .perceive import Page
 STOP_KINDS = ("done", "none")
 ENTER_KINDS = ("done", "none", "scroll_down", "scroll_up", "wait")
 
+# Said only on a site with a file, so every other page gets the question it always got.
+SITE_NOTES_RULE = " The site_notes are facts about this website that hold on every page of it."
+
 # Mutually exclusive by construction. No two options share a purpose.
 BROWSER_ACTIONS: dict[str, str] = {
     "click": (
@@ -121,8 +124,9 @@ def base_state(
     history: list[str],
     *,
     url_catalog: dict[str, str] | None,
+    site_notes: tuple[str, ...] = (),
 ) -> dict:
-    return {
+    state = {
         "goal": goal,
         "page": {"url": page.url, "title": page.title, "viewport": f"{page.vw}x{page.vh}"},
         "previous_actions": history[-8:],
@@ -140,6 +144,10 @@ def base_state(
         ],
         "known_sites": url_catalog or None,
     }
+    # Only on a site with a file, so a run on any other page sends the state it always sent.
+    if site_notes:
+        state["site_notes"] = list(site_notes)
+    return state
 
 
 def decide(
@@ -152,6 +160,7 @@ def decide(
     allow_type: bool = True,
     can_write: bool = False,
     model: str | None = None,
+    site_notes: tuple[str, ...] = (),
 ) -> Decision:
     actions = available_actions(page, allow_type=allow_type, can_write=can_write)
 
@@ -160,7 +169,7 @@ def decide(
             instructions=(
                 "You are driving a web browser one action at a time. Which single action makes the "
                 "most progress toward the goal right now? Do not repeat the action just taken unless "
-                "the page changed. If the goal is already achieved, choose done."
+                "the page changed. If the goal is already achieved, choose done." + (SITE_NOTES_RULE if site_notes else "")
             ),
             criteria=actions,
         ),
@@ -178,7 +187,7 @@ def decide(
             criteria=element_criteria(page),
         )
 
-    state = base_state(goal, page, history, url_catalog=url_catalog)
+    state = base_state(goal, page, history, url_catalog=url_catalog, site_notes=site_notes)
     response = client.system_one(state=state, questions=questions, model=model)
     answers = response.answers
 

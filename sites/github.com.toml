@@ -1,0 +1,13 @@
+# What is known about GitHub. Facts, not steps: they join the classifier's state on every
+# github.com page. See typesafe_computer_use/sites.py for the format.
+domain = "github.com"
+
+# A repository tab (Code, Issues, Pull requests) changes pages without a full load: the tab
+# repaints first and the new page lands a few hundred milliseconds later.
+settle_ms = 2000
+
+notes = [
+    "A repository page has tabs along its top: Code, Issues, Pull requests, Actions. The number beside Issues is how many issues are open.",
+    "On a repository's Issues page, every issue title is a link to that issue. When the issue wanted is not in view, the 'Search Issues' box above the list searches this repository's issues only.",
+    "The 'Search or jump to' button at the very top of every page searches all of GitHub, not this repository.",
+]

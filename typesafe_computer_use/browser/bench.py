@@ -28,6 +28,7 @@ from pathlib import Path
 from typesafe_sdk import TypeSafeClient
 
 from .. import config
+from ..sites import load_sites
 from ..writer import make_writer, provider
 from . import act
 from .cdp import Chrome
@@ -185,6 +186,13 @@ def benchmark_loop(args: argparse.Namespace) -> int:
     else:
         print(f"writer: {provider(writer)}")
 
+    try:
+        sites = load_sites(Path(args.sites))
+    except ValueError as e:
+        sys.exit(str(e))
+    if sites:
+        print(f"sites: {', '.join(s.domain for s in sites)} (from {args.sites})")
+
     runfolder = RunFolder.create(args.runs) if args.runs else None
     if runfolder is not None:
         print(f"run folder: {runfolder.root}")
@@ -203,6 +211,7 @@ def benchmark_loop(args: argparse.Namespace) -> int:
             model=args.model,
             writer=writer,
             runfolder=runfolder,
+            sites=sites,
         )
 
     s = result.summary()
@@ -251,6 +260,8 @@ def cmd_replay(args: argparse.Namespace) -> int:
             history=step["history"],
             can_write=step["can_write"],
             model=args.model,
+            # From the saved state, not today's site files, so an edited file cannot make the replay unfaithful.
+            site_notes=tuple(step["state"].get("site_notes") or ()),
         )
 
     if step["state"] and decision.state != step["state"]:
@@ -315,6 +326,7 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--headed", action="store_true")
     q.add_argument("--out", default=None)
     q.add_argument("--runs", default=None, help="write a replayable run folder under this directory")
+    q.add_argument("--sites", default="sites", help="folder of <domain>.toml site files (default: ./sites)")
     q.set_defaults(func=benchmark_loop)
 
     r = sub.add_parser("replay", help="re-decide a saved step offline, from a run folder")

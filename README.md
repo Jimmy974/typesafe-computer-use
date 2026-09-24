@@ -254,6 +254,28 @@ model doubt when the model was never at fault.
 The post-action observation and the next step's perception are the same call, so waiting
 costs no extra round trip.
 
+### Site files
+
+What is known about one website lives in `sites/<domain>.toml`, as data rather than new
+actions: a site-specific action would overlap `click`, and overlapping options read as doubt.
+
+```toml
+domain = "github.com"   # this host and its subdomains; the longest match wins
+settle_ms = 2000        # after an action, how long to wait for a page that renders in stages
+notes = ["The number beside Issues is how many issues are open."]
+```
+
+`notes` join the classifier's state as `site_notes` on every page of that site, and nowhere
+else. `settle_ms` covers a site whose first change after a click is the tab repainting, not the
+new page: the loop keeps watching for the change, then for the page to hold still. `clicker-bench
+loop` reads `./sites` (`--sites` for another folder); a file with an unknown key or a bad value
+stops the run before it starts. A replay takes the notes from the saved state, so editing a file
+never makes it unfaithful.
+
+On GitHub, "open the Issues tab and open the issue about similarly named links" stopped after two
+steps without `sites/github.com.toml`, deciding on the repository page while the issues list was
+still arriving, and finished in three with it.
+
 ### Where browser free text comes from
 
 The writer, as above: `compose_browser_text` for a field and `compose_url` for an address,
