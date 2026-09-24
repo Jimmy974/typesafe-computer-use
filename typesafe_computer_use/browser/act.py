@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from .cdp import Session
+from .cdp import CDPError, Session
 from .perceive import Element, Page, perceive
 
 # CDP expects these key codes; enter is the only one the loop needs beyond typing.
@@ -169,8 +169,11 @@ def wait_for_load(session: Session, *, timeout_ms: int = 15000, settle_ms: int =
     start = time.perf_counter()
     deadline = start + timeout_ms / 1000
     while time.perf_counter() < deadline:
-        if session.evaluate("document.readyState") == "complete":
-            break
+        try:
+            if session.evaluate("document.readyState") == "complete":
+                break
+        except CDPError:
+            pass  # asked while the old page was being torn down: the new one answers next time
         time.sleep(0.03)
     time.sleep(settle_ms / 1000)
     return (time.perf_counter() - start) * 1000

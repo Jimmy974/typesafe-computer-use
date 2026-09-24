@@ -25,6 +25,7 @@ import statistics
 import sys
 import time
 import tomllib
+import traceback
 from pathlib import Path
 
 from typesafe_sdk import TypeSafeClient
@@ -291,7 +292,14 @@ def run_task(task: dict, hands: str, *, headed: bool, writer, sites, runs: str |
                 hands=h,
             )
     except Exception as e:  # a crash is a failed run, and the comparison goes on
-        return {"task": task["name"], "hands": hands, "passed": False, "outcome": f"crashed: {e}"[:120], "steps": 0}
+        return {
+            "task": task["name"],
+            "hands": hands,
+            "passed": False,
+            "outcome": f"crashed: {e}"[:120],
+            "steps": 0,
+            "traceback": traceback.format_exc(),
+        }
     clicks = [s.act_ms for s in result.steps if s.action == "click"]
     return {
         "task": task["name"],

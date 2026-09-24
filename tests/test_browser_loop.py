@@ -336,3 +336,20 @@ def test_a_credential_field_says_nothing_about_what_it_holds():
     password = base_state("g", perceive(FakeBrowser(page)), [], url_catalog=None)["elements"][1]
     assert "filled" not in password
 
+
+def test_a_load_check_asked_mid_navigation_is_asked_again_not_a_crash():
+    from typesafe_computer_use.browser import act
+    from typesafe_computer_use.browser.cdp import CDPError
+
+    class Navigating(FakeBrowser):
+        asks = 0
+
+        def evaluate(self, expression, **kwargs):
+            if expression == "document.readyState":
+                Navigating.asks += 1
+                if Navigating.asks == 1:
+                    raise CDPError("JS error: Uncaught")
+            return super().evaluate(expression, **kwargs)
+
+    act.wait_for_load(Navigating(login_page()), timeout_ms=1000, settle_ms=0)
+    assert Navigating.asks == 2

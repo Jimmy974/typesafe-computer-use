@@ -271,7 +271,8 @@ uv run --extra playwright clicker-bench compare --repeat 2     # both, on bench/
 alternating which goes first, and passes a run only when its final address contains the task's
 `expect_url`. On the eight tasks there, two repeats each, CDP passed 14 of 16 and Playwright 13
 of 16, with the same failures bar one crash; a CDP click takes about 10 ms, a Playwright click
-20 to 70 ms. CDP stays the default. 
+20 to 70 ms. CDP stays the default. A crashed run keeps its traceback in the results JSON.
+
 ### Site files
 
 What is known about one website lives in `sites/<domain>.toml`, as data rather than new
