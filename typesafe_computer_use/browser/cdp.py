@@ -80,9 +80,12 @@ def _get_json(url: str, timeout: float = 5.0) -> Any:
 class Chrome:
     """A dedicated Chrome instance. Never touches the user's own profile."""
 
-    def __init__(self, *, port: int | None = None, headed: bool = False, profile: str | None = None):
+    def __init__(
+        self, *, port: int | None = None, headed: bool = False, profile: str | None = None, window: tuple[int, int] | None = None
+    ):
         self.port = port or free_port()
         self.headed = headed
+        self.window = window  # None: 1440x900 headless, and Chrome's own size headed
         self.profile = profile or tempfile.mkdtemp(prefix="tscu-chrome-")
         self._ephemeral = profile is None
         self.proc: subprocess.Popen | None = None
@@ -91,7 +94,8 @@ class Chrome:
     def origin(self) -> str:
         return f"http://127.0.0.1:{self.port}"
 
-    def start(self, *, window: tuple[int, int] = (1440, 900), timeout: float = 25.0) -> Chrome:
+    def start(self, *, window: tuple[int, int] | None = None, timeout: float = 25.0) -> Chrome:
+        window = window or self.window
         args = [
             find_chrome(),
             # The debugging socket listens on the loopback address (Chrome's default;
@@ -112,7 +116,9 @@ class Chrome:
         ]
         if not self.headed:
             args.insert(1, "--headless=new")
-            args.insert(2, f"--window-size={window[0]},{window[1]}")
+            window = window or (1440, 900)
+        if window:
+            args.insert(1, f"--window-size={window[0]},{window[1]}")
         self.proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         deadline = time.time() + timeout
         while time.time() < deadline:

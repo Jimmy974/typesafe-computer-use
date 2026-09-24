@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import io
 import json
 import os
 import statistics
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 from typesafe_sdk import TypeSafeClient
@@ -33,11 +35,14 @@ from ..writer import make_writer, provider
 from . import act
 from .cdp import Chrome
 from .decide import decide
+from .hands import HANDS, CdpHands, PlaywrightHands
 from .perceive import perceive
 from .report import RunFolder
 from .runner import run_goal, save
 
 FIXTURE = Path(__file__).resolve().parents[2] / "bench" / "fixture.html"
+TASKS = Path(__file__).resolve().parents[2] / "bench" / "tasks.toml"
+TASK_KEYS = {"name", "url", "goal", "expect_url", "window", "steps"}
 
 TASK = (
     "Search for 'invoice automation' in the search box and submit the search. "
@@ -197,8 +202,13 @@ def benchmark_loop(args: argparse.Namespace) -> int:
     if runfolder is not None:
         print(f"run folder: {runfolder.root}")
 
-    with Chrome(headed=args.headed) as chrome, chrome.attach() as session, TypeSafeClient() as client:
-        print(f"goal: {goal}\nurl:  {url}\n")
+    with (
+        Chrome(headed=args.headed) as chrome,
+        chrome.attach() as session,
+        TypeSafeClient() as client,
+        hands_for(args.hands, chrome, session) as hands,
+    ):
+        print(f"goal: {goal}\nurl:  {url}\nhands: {hands.name}\n")
         print(f"{'#':>3}  {'action':<12} {'detail':<40} {'conf':<9} {'perceive':>8}  {'decide':>8}  {'act':>8}  {'total':>9}")
         print("-" * 118)
         result = run_goal(
@@ -212,6 +222,7 @@ def benchmark_loop(args: argparse.Namespace) -> int:
             writer=writer,
             runfolder=runfolder,
             sites=sites,
+            hands=hands,
         )
 
     s = result.summary()
@@ -229,6 +240,130 @@ def benchmark_loop(args: argparse.Namespace) -> int:
     if args.out:
         save(result, Path(args.out))
         print(f"saved: {args.out}")
+    return 0
+
+
+@contextlib.contextmanager
+def hands_for(name: str, chrome: Chrome, session):
+    """The hands a run acts with. Playwright attaches to this Chrome and lets go when the run ends."""
+    if name == "playwright":
+        with PlaywrightHands(chrome.origin) as hands:
+            yield hands
+    else:
+        yield CdpHands(session)
+
+
+def load_tasks(path: Path) -> list[dict]:
+    """The task list for `compare`, checked, so a typo fails before any browser starts."""
+    tasks = tomllib.loads(path.read_text(encoding="utf-8")).get("task", [])
+    if not tasks:
+        raise ValueError(f"{path}: no [[task]] entries")
+    for t in tasks:
+        missing = {"name", "url", "goal", "expect_url"} - set(t)
+        unknown = set(t) - TASK_KEYS
+        if missing or unknown:
+            raise ValueError(f"{path}: task {t.get('name', '?')!r}: missing {sorted(missing)}, unknown {sorted(unknown)}")
+    return tasks
+
+
+def run_task(task: dict, hands: str, *, headed: bool, writer, sites, runs: str | None) -> dict:
+    """One task with one set of hands, in a fresh Chrome. Everything but the hands is shared."""
+    url = FIXTURE.as_uri() if task["url"] == "fixture" else task["url"]
+    window = tuple(task["window"]) if "window" in task else None
+    runfolder = RunFolder.create(runs) if runs else None
+    try:
+        with (
+            Chrome(headed=headed, window=window) as chrome,
+            chrome.attach() as session,
+            TypeSafeClient() as client,
+            hands_for(hands, chrome, session) as h,
+        ):
+            result = run_goal(
+                session,
+                client,
+                task["goal"],
+                start_url=url,
+                max_steps=int(task.get("steps", 12)),
+                verbose=False,
+                writer=writer,
+                runfolder=runfolder,
+                sites=sites,
+                hands=h,
+            )
+    except Exception as e:  # a crash is a failed run, and the comparison goes on
+        return {"task": task["name"], "hands": hands, "passed": False, "outcome": f"crashed: {e}"[:120], "steps": 0}
+    clicks = [s.act_ms for s in result.steps if s.action == "click"]
+    return {
+        "task": task["name"],
+        "hands": hands,
+        "passed": task["expect_url"] in result.url_after,
+        "outcome": result.outcome,
+        "steps": len(result.steps),
+        "wall_ms": round(result.wall_ms),
+        "click_act_ms_p50": _pct(clicks, 50) if clicks else None,
+        "url_after": result.url_after,
+        "run": str(runfolder.root) if runfolder else None,
+    }
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    """The same tasks with each set of hands, alternating, so a slow minute on a site costs both alike."""
+    _require_key()
+    try:
+        tasks = load_tasks(Path(args.tasks))
+        sites = load_sites(Path(args.sites))
+        writer = make_writer()
+    except ValueError as e:
+        sys.exit(str(e))
+    hands = [h.strip() for h in args.hands.split(",")]
+    if bad := [h for h in hands if h not in HANDS]:
+        sys.exit(f"unknown hands {bad}; choose from {', '.join(HANDS)}")
+    if args.only:
+        tasks = [t for t in tasks if t["name"] in args.only.split(",")]
+    print(
+        f"{len(tasks)} tasks x {len(hands)} hands x {args.repeat} repeat(s); writer: {provider(writer) if writer else 'none'}\n"
+    )
+
+    rows: list[dict] = []
+    for task in tasks:
+        for r in range(args.repeat):
+            for h in hands if r % 2 == 0 else list(reversed(hands)):
+                row = run_task(task, h, headed=args.headed, writer=writer, sites=sites, runs=args.runs)
+                rows.append(row)
+                mark = "PASS" if row["passed"] else "fail"
+                click = f"{row['click_act_ms_p50']:.0f}ms" if row.get("click_act_ms_p50") is not None else "-"
+                print(
+                    f"  {task['name']:<22} {h:<11} {mark}  {row['outcome']:<20} steps={row['steps']:<3} "
+                    f"wall={row.get('wall_ms', 0) / 1000:5.1f}s  click p50={click}",
+                    flush=True,
+                )
+
+    print("\nSUMMARY")
+    print(f"  {'hands':<11} {'passed':>9}  {'wall p50':>9}  {'click p50':>10}  {'steps p50':>9}")
+    summary = {}
+    for h in hands:
+        mine = [r for r in rows if r["hands"] == h]
+        passed = sum(r["passed"] for r in mine)
+        walls = [r["wall_ms"] for r in mine if "wall_ms" in r]
+        clicks = [r["click_act_ms_p50"] for r in mine if r.get("click_act_ms_p50") is not None]
+        steps = [r["steps"] for r in mine if r["passed"]]
+        summary[h] = {
+            "passed": passed,
+            "runs": len(mine),
+            "wall_ms_p50": _pct(walls, 50) if walls else None,
+            "click_act_ms_p50": _pct(clicks, 50) if clicks else None,
+            "steps_p50_when_passed": _pct(steps, 50) if steps else None,
+        }
+        s = summary[h]
+        print(
+            f"  {h:<11} {passed:>4}/{len(mine):<4}  {(s['wall_ms_p50'] or 0) / 1000:8.1f}s  "
+            f"{s['click_act_ms_p50'] or 0:8.0f}ms  {s['steps_p50_when_passed'] or 0:>9}"
+        )
+
+    out = Path(args.runs or ".") / time.strftime("compare-%Y%m%d-%H%M%S.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"summary": summary, "runs": rows}, indent=2), encoding="utf-8")
+    print(f"\nsaved: {out}")
     return 0
 
 
@@ -301,6 +436,7 @@ def main(argv: list[str] | None = None) -> int:
             "  clicker-bench perception --url https://news.ycombinator.com\n"
             "  clicker-bench perception --fixture --n 8\n"
             "  clicker-bench loop --fixture --runs runs\n"
+            "  clicker-bench compare --repeat 2\n"
             "  clicker-bench replay --run runs/<ts> --step 2"
         ),
     )
@@ -327,7 +463,18 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--out", default=None)
     q.add_argument("--runs", default=None, help="write a replayable run folder under this directory")
     q.add_argument("--sites", default="sites", help="folder of <domain>.toml site files (default: ./sites)")
+    q.add_argument("--hands", default="cdp", choices=HANDS, help="what carries out clicks, typing and keys")
     q.set_defaults(func=benchmark_loop)
+
+    c = sub.add_parser("compare", help="the same tasks with each set of hands, side by side")
+    c.add_argument("--tasks", default=str(TASKS), help="task list (default: bench/tasks.toml)")
+    c.add_argument("--hands", default=",".join(HANDS), help="comma-separated, from: " + ", ".join(HANDS))
+    c.add_argument("--only", default=None, help="comma-separated task names to run")
+    c.add_argument("--repeat", type=int, default=1)
+    c.add_argument("--sites", default="sites")
+    c.add_argument("--runs", default="runs", help="where run folders and the results JSON go")
+    c.add_argument("--headed", action="store_true")
+    c.set_defaults(func=cmd_compare)
 
     r = sub.add_parser("replay", help="re-decide a saved step offline, from a run folder")
     r.add_argument("--run", required=True, help="runs/<timestamp> directory")

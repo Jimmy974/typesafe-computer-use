@@ -1,0 +1,59 @@
+# Tasks for `clicker-bench compare`. A run passes when the page it ends on has `expect_url` in
+# its address: where the run got to, not what it said about itself.
+#
+#   name        a short label for the table
+#   url         the start page; "fixture" is bench/fixture.html
+#   goal        what the run is asked to do
+#   expect_url  text the final address must contain
+#   window      optional [width, height]; a narrow window wraps long links
+#   steps       optional step limit (default 12)
+
+[[task]]
+name = "fixture-search"
+url = "fixture"
+goal = "Search for 'invoice automation' in the search box and submit the search. Then open the guide whose title mentions automation."
+expect_url = "#result-automation"
+
+[[task]]
+name = "fixture-pricing"
+url = "fixture"
+goal = "Open the Pricing page"
+expect_url = "#pricing"
+
+[[task]]
+name = "hn-comments"
+url = "https://news.ycombinator.com"
+goal = "Open the comments of the top story"
+expect_url = "item?id="
+
+[[task]]
+name = "wikipedia-search"
+url = "https://en.wikipedia.org/wiki/Main_Page"
+goal = "Search for Singapore and open its article"
+expect_url = "/wiki/Singapore"
+
+[[task]]
+name = "books-travel"
+url = "https://books.toscrape.com"
+goal = "Open the Travel category, then open the first book in it"
+expect_url = "its-only-the-himalayas"
+
+[[task]]
+name = "github-issue"
+url = "https://github.com/awlevin/typesafe-computer-use"
+goal = "Open the repository's Issues tab and open the issue about similarly named links"
+expect_url = "/issues/3"
+
+[[task]]
+name = "github-issue-narrow"
+url = "https://github.com/awlevin/typesafe-computer-use"
+goal = "Open the repository's Issues tab and open the issue about similarly named links"
+expect_url = "/issues/3"
+window = [1200, 903]
+
+[[task]]
+name = "httpbin-form"
+url = "https://httpbin.org/forms/post"
+goal = "Fill the pizza order form: customer name Jimmy Wong, telephone 12345678, email jimmy@example.com, size Medium, topping Bacon. Then submit the order."
+expect_url = "httpbin.org/post"
+steps = 16

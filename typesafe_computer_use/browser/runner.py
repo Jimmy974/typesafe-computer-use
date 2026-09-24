@@ -26,6 +26,7 @@ from ..sites import Site, site_for
 from ..writer import Writer, compose_browser_text, compose_url, looks_credential
 from . import act
 from .decide import Decision, available_actions, decide, field_context, verify_typed
+from .hands import CdpHands, Hands
 from .perceive import Element, Page, perceive
 from .report import RunFolder, render_payload
 
@@ -155,7 +156,9 @@ def run_goal(
     writer: Writer | None = None,
     runfolder: RunFolder | None = None,
     sites: list[Site] | None = None,
+    hands: Hands | None = None,
 ) -> RunResult:
+    hands = hands or CdpHands(session)
     result = RunResult(goal=goal, url=str(session.evaluate("location.href") or ""), outcome="incomplete")
     if start_url:
         act.navigate(session, start_url)
@@ -231,7 +234,7 @@ def run_goal(
                 detail = f"click {idx} -> element missing"
                 noops += 1
             else:
-                detail = act.click(session, int(element.index), element, page)
+                detail = hands.click(int(element.index), element, page)
         elif kind == "type_text":
             # The classifier picked the action and the field; the writer supplies the
             # text. The field is checked before the writer is asked, so a credential
@@ -243,19 +246,19 @@ def run_goal(
                 noops += 1
                 touched = False
             else:
-                act.type_text(session, int(target.index), text)
+                typed = hands.type_text(int(target.index), text)
                 value_now = act.field_value(session, int(target.index))
                 ok = verify_typed(client, goal, target.label(), text, value_now, model=model)
                 if ok < 0.5:
                     act.clear_field(session, int(target.index))
-                    detail = f"type {text!r} -> verify {ok:.2f}, cleared"
+                    detail = f"type {text!r} -> verify {ok:.2f}, cleared" + (f" ({typed})" if "FAILED" in typed else "")
                     noops += 1
                 else:
                     detail = f"type {text!r} -> verify {ok:.2f}"
         elif kind == "press_enter":
-            detail = act.press(session, "enter")
+            detail = hands.press("enter")
         elif kind == "press_escape":
-            detail = act.press(session, "escape")
+            detail = hands.press("escape")
         elif kind == "scroll_down":
             detail = act.scroll(session, 3, page)
         elif kind == "scroll_up":

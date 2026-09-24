@@ -44,6 +44,11 @@ clicker = "typesafe_computer_use.cli:main"
 clicker-inspect = "typesafe_computer_use.cli:inspect"
 clicker-bench = "typesafe_computer_use.browser.bench:main"
 
+[project.optional-dependencies]
+playwright = [
+    "playwright==1.63.0",
+]
+
 [dependency-groups]
 dev = ["pytest==9.1.1", "ruff==0.16.8"]
 

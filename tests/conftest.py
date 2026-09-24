@@ -68,7 +68,7 @@ import pytest  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from typesafe_computer_use import macos, windows  # noqa: E402
-from typesafe_computer_use.browser import cdp  # noqa: E402
+from typesafe_computer_use.browser import cdp, hands  # noqa: E402
 from typesafe_computer_use.models import Item, Screen  # noqa: E402
 
 
@@ -110,6 +110,8 @@ def no_real_machine(monkeypatch):
     monkeypatch.setattr(cdp, "find_chrome", refuse("cdp.find_chrome"))
     monkeypatch.setattr(cdp, "_get_json", refuse("the CDP HTTP endpoint"))
     monkeypatch.setattr(cdp.websocket, "create_connection", refuse("a CDP websocket"))
+    # Playwright starts its driver process and attaches to a Chrome; a test gives it a fake page instead.
+    monkeypatch.setattr(hands.PlaywrightHands, "__enter__", refuse("PlaywrightHands.__enter__"))
     _loopback_only(monkeypatch, refuse)
 
 

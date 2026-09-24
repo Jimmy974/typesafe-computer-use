@@ -254,6 +254,24 @@ model doubt when the model was never at fault.
 The post-action observation and the next step's perception are the same call, so waiting
 costs no extra round trip.
 
+### Hands: CDP or Playwright
+
+What carries out a click, a typed string or a key is swappable; perception, waiting and the
+decision are shared. `cdp` (the default) sends real input events through our own CDP session.
+`playwright` attaches Playwright to the same Chrome and acts through a locator, after its checks
+that the element is visible, stable and would receive the click. It is optional:
+
+```
+uv sync --extra playwright
+uv run --extra playwright clicker-bench loop --fixture --hands playwright
+uv run --extra playwright clicker-bench compare --repeat 2     # both, on bench/tasks.toml
+```
+
+`compare` runs every task in `bench/tasks.toml` with each set of hands in a fresh Chrome,
+alternating which goes first, and passes a run only when its final address contains the task's
+`expect_url`. On the eight tasks there, two repeats each, CDP passed 14 of 16 and Playwright 13
+of 16, with the same failures bar one crash; a CDP click takes about 10 ms, a Playwright click
+20 to 70 ms. CDP stays the default. 
 ### Site files
 
 What is known about one website lives in `sites/<domain>.toml`, as data rather than new
