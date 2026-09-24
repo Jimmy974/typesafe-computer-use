@@ -32,6 +32,7 @@ from typesafe_sdk import TypeSafeClient
 
 from .. import config
 from ..formdata import FormData, load_data
+from ..scenarios import load_scenarios
 from ..sites import load_sites
 from ..writer import make_writer, provider
 from . import act
@@ -313,7 +314,8 @@ def run_task(task: dict, hands: str, *, headed: bool, writer, sites, runs: str |
     return {
         "task": task["name"],
         "hands": hands,
-        "passed": task["expect_url"] in result.url_after,
+        # Where the run got to, when the task says where that is; otherwise its own confident done.
+        "passed": task["expect_url"] in result.url_after if task.get("expect_url") else result.outcome == "done",
         "outcome": result.outcome,
         "steps": len(result.steps),
         "wall_ms": round(result.wall_ms),
@@ -388,6 +390,55 @@ def cmd_compare(args: argparse.Namespace) -> int:
     out.write_text(json.dumps({"summary": summary, "runs": rows}, indent=2), encoding="utf-8")
     print(f"\nsaved: {out}")
     return 0
+
+
+def cmd_batch(args: argparse.Namespace) -> int:
+    """Every scenario in a file, one after another, each in a fresh Chrome.
+
+    A failed scenario is recorded and the batch goes on. Nothing is retried: a form that was
+    submitted and then looked like a failure would be submitted twice. The exit code is 1 when
+    any scenario failed, so a script can tell.
+    """
+    _require_key()
+    try:
+        scenarios = load_scenarios(Path(args.file), defaults={"url": args.url, "goal": args.goal, "expect_url": args.expect_url})
+        sites = load_sites(Path(args.sites))
+        writer = make_writer()
+    except (OSError, ValueError) as e:
+        sys.exit(str(e))
+    if args.only:
+        wanted = set(args.only.split(","))
+        if missing := wanted - {s.name for s in scenarios}:
+            sys.exit(f"no scenario named {', '.join(sorted(missing))}")
+        scenarios = [s for s in scenarios if s.name in wanted]
+    print(f"{len(scenarios)} scenario(s) from {args.file}; hands: cdp; nothing is retried\n")
+
+    rows: list[dict] = []
+    try:
+        for n, sc in enumerate(scenarios, 1):
+            task = {"name": sc.name, "url": sc.url, "goal": sc.goal, "expect_url": sc.expect_url, "steps": sc.steps}
+            row = run_task(task, "cdp", headed=args.headed, writer=writer, sites=sites, runs=args.runs, data=sc.data)
+            row.pop("hands", None)
+            row.pop("click_act_ms_p50", None)
+            rows.append(row)
+            mark = "PASS" if row["passed"] else "FAIL"
+            print(
+                f"  [{n}/{len(scenarios)}] {sc.name:<24} {mark}  {row['outcome']:<22} steps={row['steps']:<3} "
+                f"{row.get('wall_ms', 0) / 1000:5.1f}s  {row.get('run') or ''}",
+                flush=True,
+            )
+    except KeyboardInterrupt:
+        print("\nstopped by Ctrl-C; the scenarios after this one did not run")
+
+    passed = sum(r["passed"] for r in rows)
+    failed = [r["task"] for r in rows if not r["passed"]]
+    print(f"\n{passed}/{len(rows)} passed" + (f"; failed: {', '.join(failed)}" if failed else ""))
+    # Names, outcomes and addresses only: the saved values stay in the scenario file.
+    out = Path(args.runs or ".") / time.strftime("batch-%Y%m%d-%H%M%S.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({"file": args.file, "passed": passed, "runs": rows}, indent=2), encoding="utf-8")
+    print(f"saved: {out}")
+    return 0 if passed == len(scenarios) else 1
 
 
 def _saved_data(state: dict) -> dict:
@@ -469,6 +520,7 @@ def main(argv: list[str] | None = None) -> int:
             "  clicker-bench perception --fixture --n 8\n"
             "  clicker-bench loop --fixture --runs runs\n"
             "  clicker-bench compare --repeat 2\n"
+            "  clicker-bench batch mydata/orders.csv --url https://example.com/order --goal '...'\n"
             "  clicker-bench replay --run runs/<ts> --step 2"
         ),
     )
@@ -498,6 +550,17 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--hands", default="cdp", choices=HANDS, help="what carries out clicks, typing and keys")
     q.add_argument("--data", default=None, help="a .toml of [fields] to type and [choices] to pick, for a form")
     q.set_defaults(func=benchmark_loop)
+
+    b = sub.add_parser("batch", help="run every scenario in a .toml or .csv file, one after another")
+    b.add_argument("file", help="scenario file: .toml, or .csv with one scenario per row")
+    b.add_argument("--url", default=None, help="start page for scenarios that do not set one")
+    b.add_argument("--goal", default=None, help="goal for scenarios that do not set one")
+    b.add_argument("--expect-url", default=None, help="text a passing run's final address contains")
+    b.add_argument("--only", default=None, help="comma-separated scenario names to run")
+    b.add_argument("--sites", default="sites")
+    b.add_argument("--runs", default="runs", help="where run folders and the results JSON go")
+    b.add_argument("--headed", action="store_true")
+    b.set_defaults(func=cmd_batch)
 
     c = sub.add_parser("compare", help="the same tasks with each set of hands, side by side")
     c.add_argument("--tasks", default=str(TASKS), help="task list (default: bench/tasks.toml)")

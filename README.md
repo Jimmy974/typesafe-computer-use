@@ -325,6 +325,27 @@ On the pizza form, three runs each, the goal-only version and the data file both
 a typing step took 1.5 s with the local writer and 0.24 s from the file, and a whole run 7.1 s
 and 3.2 s.
 
+### Batches: many scenarios of one use case
+
+`clicker-bench batch` runs every scenario in a file, one after another, each in a fresh Chrome:
+the same flow with different data, or a case with its own goal. The file is TOML, a CSV with one
+scenario per row, or TOML whose `rows` points at a CSV and holds the shared settings:
+
+```
+uv run clicker-bench batch examples/pizza-orders.toml
+uv run clicker-bench batch mydata/orders.csv --url https://example.com/order --goal "..." --expect-url /done
+```
+
+In a CSV, `name`, `url`, `goal`, `expect_url` and `steps` columns set those for the row, a
+`choice:<key>` column is a choice, and every other column is a field; an empty cell keeps the
+default. A TOML `[defaults.fields]` or `[defaults.choices]` table is shared, and a scenario's own
+values win. Every scenario is checked before any browser starts. A run passes when its final
+address contains `expect_url`, or, without one, when it ends `done`. A failed scenario is recorded
+and the batch goes on; nothing is retried, since a retry could submit a form twice. The exit code
+is 1 when any failed, and `runs/batch-*.json` lists each scenario's outcome, address and run
+folder, never its values. `mydata/` is ignored by git, for real files. `examples/pizza-orders.toml`
+runs three orders, one with its own goal, and all three pass with the right size and toppings.
+
 ### Where browser free text comes from
 
 The writer, as above: `compose_browser_text` for a field and `compose_url` for an address,

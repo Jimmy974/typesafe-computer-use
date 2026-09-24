@@ -8,3 +8,6 @@ __pycache__/
 dist/
 runs/
 bench/results-*.json
+
+# Real scenario and data files: never committed
+mydata/

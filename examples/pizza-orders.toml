@@ -1,0 +1,20 @@
+# A batch of pizza orders on httpbin.org/forms/post. Fake data: put real files in mydata/,
+# which git ignores.
+#
+#   uv run clicker-bench batch examples/pizza-orders.toml
+#   uv run clicker-bench batch examples/pizza-orders.toml --only amy-no-toppings --headed
+
+url = "https://httpbin.org/forms/post"
+goal = "Fill the pizza order form with the saved data, then submit the order."
+expect_url = "httpbin.org/post"
+rows = "pizza-orders.csv"            # one more scenario per row
+
+[defaults.fields]                    # every scenario's, unless it sets its own
+email = "orders@example.com"
+
+# A case with its own flow: a different goal, and no topping to tick.
+[[scenario]]
+name = "amy-no-toppings"
+goal = "Fill the pizza order form with the saved data, leave every topping unticked, then submit the order."
+fields = { customer_name = "Amy Chan", telephone = "87654321", email = "amy@example.com" }
+choices = { size = "Large" }
