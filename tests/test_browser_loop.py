@@ -280,3 +280,18 @@ def test_decide_survives_an_answer_without_a_satisfied_noul():
 
     decision = decide(Partial(), "g", perceive(FakeBrowser(login_page())), [])
     assert decision.satisfied.noul == 0.0 and decision.kind.choice == "wait"
+
+
+def test_a_doubtful_done_stops_as_low_confidence_not_success(tmp_path):
+    class Doubtful(FakeTypeSafe):
+        def system_one(self, *, state, questions, model=None):
+            self.requests.append({"state": state, "questions": questions})
+            return SimpleNamespace(answers={"kind": choice("done", 0.26), "satisfied": NoulAnswer(noul=0.25)})
+
+    result, _ = run(FakeBrowser(login_page()), Doubtful(), tmp_path, steps=1)
+    assert result.outcome == "low_confidence(0.26)"
+
+
+def test_a_confident_done_still_finishes_the_run(tmp_path):
+    result, _ = run(FakeBrowser(login_page()), FakeTypeSafe(("done", None)), tmp_path, steps=1)
+    assert result.outcome == "done"

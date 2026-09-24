@@ -323,6 +323,12 @@ def resolve(
     log: Log,
 ) -> bool:
     """Apply the stop rules, then the action. True to keep looping."""
+    # A doubtful `done` is doubt, not success: it stops the run as low confidence, and the writer
+    # reads the screen either way. A doubtful `none` stops the run all the same, so it keeps its name.
+    if decision.kind.choice == "done" and decision.confidence < cfg.min_confidence:
+        log(f"  model says 'done' at {decision.confidence:.2f}, below {cfg.min_confidence}; stopping")
+        state.outcome = "low confidence"
+        return False
     if decision.stops:
         log(f"  model says {decision.kind.choice!r}; stopping")
         state.outcome = "done" if decision.kind.choice == "done" else "nothing helps"

@@ -308,7 +308,8 @@ def run_goal(
             print(step.line(), flush=True)
         history.append(f"{kind}: {detail}" + ("" if changed else " (page unchanged)"))
 
-        if kind == "done" or decision.satisfied.noul >= 0.5:
+        # A doubtful `done` is doubt, not success, so it falls through to the confidence check.
+        if (kind == "done" and decision.confidence >= min_confidence) or decision.satisfied.noul >= 0.5:
             result.outcome = "done"
             break
         if kind == "none":

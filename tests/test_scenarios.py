@@ -1716,3 +1716,11 @@ def test_l53_unverified_keystrokes_stay_when_the_field_will_not_take_a_value(mon
     assert "via keystrokes" in state.history[0] and "could not safely restore previous value" in state.history[0]
     assert world.typed["Search"] == "bruno mars tour"  # left for the next step to see, not erased blind
     assert world.log == ["clear_field", "type:bruno mars tour"]  # emptied before typing, never after
+
+
+def test_a_doubtful_done_stops_as_low_confidence_not_success(monkeypatch, tmp_path):
+    world = World([Page(name="sign in", items=["Username", "Password", "Sign in"], url="https://example.com/login")])
+
+    state = drive(world, scripted(("done", None, 0.26)), goal=GOAL, monkeypatch=monkeypatch, tmp_path=tmp_path)
+
+    assert state.outcome == "low confidence"
