@@ -32,6 +32,7 @@ uv sync
 | `TYPESAFE_API_KEY` | Jev，每一步都要用（必需） |
 | `CLICKER_WRITER_API=openai` 等 | Writer 用本機 oMLX |
 | `CLICKER_WRITER_VISION=false` | Ornith 睇唔到圖，要保持 `false` |
+| `CLICKER_BASIC_AUTH`（選擇性） | 網站有 HTTP basic auth 先用，見第 6.5 節 |
 
 用 writer 之前要開住 oMLX（`http://127.0.0.1:8000`）。只用資料檔嘅話，唔開都得。
 
@@ -236,6 +237,31 @@ notes = [
 - **一個網站一個檔**，唔係一頁一個
 - `notes` 只寫**事實**，唔好寫步驟，亦唔好寫個人資料（呢啲檔會 commit）
 - **遇到問題先加**：先唔加照行，卡住再睇 run folder，加一樣會幫到佢嘅嘢
+
+---
+
+## 6.5 有 HTTP basic auth 嘅網站
+
+有啲測試或者 preprod 網站一開就彈個瀏覽器登入框（HTTP basic auth）。喺 `.env` 加：
+
+```
+CLICKER_BASIC_AUTH=preprod.example.com admin:密碼
+```
+
+- 格式係 `<網域> <用戶名>:<密碼>`，網域唔好加 `https://` 或者路徑；密碼可以有 `:` 同 `$`
+- **只會答呢一個網域**，而且一定要 https；其他網站、http、proxy 嘅登入框一律拒絕
+- 密碼只會用嚟答 Chrome 嘅登入框，**唔會**出現喺網址、記錄、run folder，亦唔會送去 TypeSafe
+- 密碼錯嘅話最多答 3 次就放棄，唔會無限重試
+- 開始時會顯示 `basic auth: answered for https://<網域> only`，確認設定生效
+- 一次只支援一個網域；`.env` 已經 gitignore，唔好將密碼寫入其他檔案
+
+⚠️ 呢個只係網站門口嘅 basic auth。網站**自己嘅登入頁、密碼同驗證碼**，工具照樣唔會填。
+
+建議先用唔會送資料去 TypeSafe 嘅指令確認登入成功：
+
+```bash
+uv run clicker-bench perception --url https://preprod.example.com/ --no-ocr --n 1
+```
 
 ---
 

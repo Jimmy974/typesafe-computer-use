@@ -297,6 +297,20 @@ On GitHub, "open the Issues tab and open the issue about similarly named links" 
 steps without `sites/github.com.toml`, deciding on the repository page while the issues list was
 still arriving, and finished in three with it.
 
+### HTTP basic auth
+
+A site behind HTTP basic auth, such as a preprod environment, is reached with one line in `.env`:
+
+```
+CLICKER_BASIC_AUTH=preprod.example.com admin:password
+```
+
+Chrome pauses only that host's requests, and answers a login challenge only when it comes from
+the server, over https, from exactly that host; every other challenge is cancelled, and a wrong
+password is answered three times and then left to fail. The password goes only into that answer:
+never a header on every request, a URL, the state, the log or the run folder. It applies to
+`perception`, `loop`, `compare` and `batch`. A site's own login page is still never filled in.
+
 ### Saved form data
 
 Values you already have go in a file instead of the goal:

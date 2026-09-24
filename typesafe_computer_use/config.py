@@ -102,3 +102,18 @@ def answer_model() -> str:
 
 def email() -> str | None:
     return os.environ.get("CLICKER_EMAIL") or None
+
+
+def basic_auth() -> tuple[str, str, str] | None:
+    """CLICKER_BASIC_AUTH="<host> <user>:<password>": HTTP basic auth for that one host, or None.
+
+    Read from the environment or .env only, so the password is never on a command line, in a
+    scenario file, or in anything committed. The password may hold colons and dollar signs."""
+    raw = os.environ.get("CLICKER_BASIC_AUTH", "").strip()
+    if not raw:
+        return None
+    host, _, credentials = raw.partition(" ")
+    user, colon, password = credentials.strip().partition(":")
+    if "/" in host or ":" in host or not host or not colon or not user or not password:
+        raise ValueError('CLICKER_BASIC_AUTH must be "<host> <user>:<password>", with a bare host name such as example.com')
+    return host.lower(), user, password

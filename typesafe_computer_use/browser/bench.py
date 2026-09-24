@@ -36,7 +36,7 @@ from ..scenarios import load_scenarios
 from ..sites import load_sites
 from ..writer import make_writer, provider
 from . import act
-from .cdp import Chrome
+from .cdp import Chrome, Session, enable_basic_auth
 from .decide import decide
 from .hands import HANDS, CdpHands, PlaywrightHands
 from .perceive import perceive
@@ -97,7 +97,7 @@ def ocr_perception(session, *, budget: int = 120) -> dict:
 
 def benchmark_perception(args: argparse.Namespace) -> int:
     url = FIXTURE.as_uri() if args.fixture else args.url
-    with Chrome(headed=args.headed) as chrome, chrome.attach() as session:
+    with Chrome(headed=args.headed) as chrome, attach(chrome) as session:
         act.navigate(session, url)
         act.wait_for_load(session)
 
@@ -213,7 +213,7 @@ def benchmark_loop(args: argparse.Namespace) -> int:
 
     with (
         Chrome(headed=args.headed) as chrome,
-        chrome.attach() as session,
+        attach(chrome) as session,
         TypeSafeClient() as client,
         hands_for(args.hands, chrome, session) as hands,
     ):
@@ -253,6 +253,14 @@ def benchmark_loop(args: argparse.Namespace) -> int:
     return 0
 
 
+def attach(chrome: Chrome) -> Session:
+    """A session on Chrome's page, answering basic auth for the host CLICKER_BASIC_AUTH names, if any."""
+    session = chrome.attach()
+    if credentials := config.basic_auth():
+        enable_basic_auth(session, *credentials)
+    return session
+
+
 @contextlib.contextmanager
 def hands_for(name: str, chrome: Chrome, session):
     """The hands a run acts with. Playwright attaches to this Chrome and lets go when the run ends."""
@@ -284,7 +292,7 @@ def run_task(task: dict, hands: str, *, headed: bool, writer, sites, runs: str |
     try:
         with (
             Chrome(headed=headed, window=window) as chrome,
-            chrome.attach() as session,
+            attach(chrome) as session,
             TypeSafeClient() as client,
             hands_for(hands, chrome, session) as h,
         ):
@@ -580,6 +588,12 @@ def main(argv: list[str] | None = None) -> int:
 
     args = ap.parse_args(argv)
     config.load_dotenv(DOTENV)
+    try:
+        credentials = config.basic_auth()
+    except ValueError as e:
+        sys.exit(str(e))
+    if credentials:
+        print(f"basic auth: answered for https://{credentials[0]} only")
     return int(args.func(args))
 
 

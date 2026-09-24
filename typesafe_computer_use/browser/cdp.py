@@ -22,6 +22,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -174,8 +175,24 @@ class Session:
         self._id = 0
         self._ws = websocket.create_connection(ws_url, timeout=timeout, max_size=max_size, origin=origin)
         self.calls = 0
+        self._handlers: dict[str, Callable[[dict], None]] = {}
+        self._unawaited: set[int] = set()  # ids sent with `send`, whose replies nobody reads
 
     # -- plumbing ----------------------------------------------------------
+    def on(self, event: str, handler: Callable[[dict], None]) -> None:
+        """Run `handler(params)` for each `event` read while a call waits for its reply.
+
+        A handler answers with `send`, never `call`: a call inside the read loop would read past
+        the reply the outer call is waiting for. Events arrive only while a call is waiting, and
+        the loop makes one every few milliseconds while a page loads."""
+        self._handlers[event] = handler
+
+    def send(self, method: str, params: dict | None = None) -> None:
+        """Send without waiting for the reply, which the read loop then drops."""
+        self._id += 1
+        self._unawaited.add(self._id)
+        self._ws.send(json.dumps({"id": self._id, "method": method, "params": params or {}}))
+
     def call(self, method: str, params: dict | None = None) -> dict:
         self._id += 1
         msg_id = self._id
@@ -185,8 +202,16 @@ class Session:
             if not raw:
                 raise CDPError("websocket closed")
             data = json.loads(raw)
-            if data.get("id") != msg_id:
-                continue  # an event, not our reply
+            if "id" not in data:
+                handler = self._handlers.get(str(data.get("method")))
+                if handler is not None:
+                    handler(data.get("params") or {})
+                continue
+            if data["id"] in self._unawaited:
+                self._unawaited.discard(data["id"])
+                continue
+            if data["id"] != msg_id:
+                continue
             self.calls += 1
             if "error" in data:
                 raise CDPError(f"{method}: {data['error']}")
@@ -210,3 +235,46 @@ class Session:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+MAX_AUTH_ANSWERS = 3  # a wrong password is asked again and again; this many answers, then the page gets its 401
+
+
+def enable_basic_auth(session: Session, host: str, username: str, password: str) -> None:
+    """Answer HTTP basic auth for one host, over https, and for nothing else.
+
+    Chrome pauses only this host's requests (the pattern), each goes on unchanged, and a login
+    challenge is answered only when it comes from the server itself, over https, from exactly this
+    host. Every other challenge is cancelled. The credentials go only into Chrome's answer: never
+    into a header on every request, which would send them to every site the page loads from, and
+    never into a URL, the state, the log or the run folder.
+    """
+    host = host.strip().lower()
+    answered = 0
+
+    def is_host(url: str) -> bool:
+        parts = urllib.parse.urlsplit(url or "")
+        return parts.scheme == "https" and (parts.hostname or "").lower() == host
+
+    def paused(params: dict) -> None:
+        session.send("Fetch.continueRequest", {"requestId": params["requestId"]})
+
+    def challenged(params: dict) -> None:
+        nonlocal answered
+        challenge, request = params.get("authChallenge") or {}, params.get("request") or {}
+        mine = (
+            challenge.get("source") == "Server"
+            and is_host(str(challenge.get("origin", "")))
+            and is_host(str(request.get("url", "")))
+            and answered < MAX_AUTH_ANSWERS
+        )
+        if mine:
+            answered += 1
+            response = {"response": "ProvideCredentials", "username": username, "password": password}
+        else:
+            response = {"response": "CancelAuth"}
+        session.send("Fetch.continueWithAuth", {"requestId": params["requestId"], "authChallengeResponse": response})
+
+    session.on("Fetch.requestPaused", paused)
+    session.on("Fetch.authRequired", challenged)
+    session.call("Fetch.enable", {"handleAuthRequests": True, "patterns": [{"urlPattern": f"https://{host}/*"}]})
