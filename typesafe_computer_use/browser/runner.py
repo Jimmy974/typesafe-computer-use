@@ -29,6 +29,8 @@ from .decide import Decision, available_actions, decide, field_context, verify_t
 from .perceive import Element, Page, perceive
 from .report import RunFolder, render_payload
 
+MAX_REPEATS = 3  # the same action, this many times in a row, each leaving the page as it was, ends the run
+
 
 @dataclass
 class Step:
@@ -163,6 +165,8 @@ def run_goal(
     pending: Page | None = None
     history: list[str] = []
     noops = 0
+    repeats = 0  # the same action, in a row, each leaving the page as it was
+    last_action: tuple | None = None
     started = time.perf_counter()
 
     for n in range(1, max_steps + 1):
@@ -307,6 +311,9 @@ def run_goal(
         if verbose:
             print(step.line(), flush=True)
         history.append(f"{kind}: {detail}" + ("" if changed else " (page unchanged)"))
+        action = (kind, decision.chosen_element if kind in ("click", "type_text") else None)
+        repeats = repeats + 1 if touched and not changed and action == last_action else (1 if touched and not changed else 0)
+        last_action = action
 
         # A doubtful `done` is doubt, not success, so it falls through to the confidence check.
         if (kind == "done" and decision.confidence >= min_confidence) or decision.satisfied.noul >= 0.5:
@@ -320,6 +327,10 @@ def run_goal(
             break
         if noops >= 2:
             result.outcome = "stuck"
+            break
+        if repeats >= MAX_REPEATS:
+            # A click that lands and does nothing is not a noop to the action, only to the page.
+            result.outcome = "stalled"
             break
     else:
         result.outcome = "max_steps"

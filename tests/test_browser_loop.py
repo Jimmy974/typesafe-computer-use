@@ -295,3 +295,16 @@ def test_a_doubtful_done_stops_as_low_confidence_not_success(tmp_path):
 def test_a_confident_done_still_finishes_the_run(tmp_path):
     result, _ = run(FakeBrowser(login_page()), FakeTypeSafe(("done", None)), tmp_path, steps=1)
     assert result.outcome == "done"
+
+
+def test_the_same_click_that_changes_nothing_three_times_ends_the_run(tmp_path):
+    """A click can land and do nothing: the page is the same after it. Repeating it is a stall."""
+    client = FakeTypeSafe(*[("click", "2")] * 8)
+    result, _ = run(FakeBrowser(login_page()), client, tmp_path, steps=8)
+    assert result.outcome == "stalled" and len(result.steps) == 3
+
+
+def test_different_actions_that_change_nothing_are_not_a_repeat(tmp_path):
+    client = FakeTypeSafe(("click", "2"), ("scroll_down", None), ("click", "2"), ("scroll_down", None))
+    result, _ = run(FakeBrowser(login_page()), client, tmp_path, steps=4)
+    assert result.outcome != "stalled"

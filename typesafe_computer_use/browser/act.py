@@ -25,13 +25,33 @@ def _select(index: int) -> str:
 
 
 def element_rect(session: Session, index: int) -> dict | None:
+    """Where to press the element: the centre of the first line of it that the page says is really it.
+
+    The centre of the bounding box misses a link that wraps: its box spans both lines, and the
+    middle of that box can be blank space past the end of the shorter line. So each line box is
+    tried in turn, and a point counts only when `elementFromPoint` lands on the element or inside
+    it. When none does, something covers it, and the first line's centre is returned anyway with
+    `hit` false: a real click then lands on the cover, as it would for a person.
+    """
     return session.evaluate(
         f"""(() => {{
           const el = document.querySelector({_select(index)!r});
           if (!el) return null;
-          const r = el.getBoundingClientRect();
-          return {{x: Math.round(r.left + Math.min(r.width,1400)/2), y: Math.round(r.top + r.height/2),
-                   w: Math.round(r.width), h: Math.round(r.height), vw: innerWidth, vh: innerHeight}};
+          const vw = innerWidth, vh = innerHeight, box = el.getBoundingClientRect();
+          const lines = Array.from(el.getClientRects()).filter(r => r.width >= 1 && r.height >= 1);
+          const centre = r => [r.left + Math.min(r.width, 1400) / 2, r.top + r.height / 2];
+          const lands = (x, y) => {{
+            if (x < 0 || y < 0 || x >= vw || y >= vh) return false;
+            const hit = document.elementFromPoint(x, y);
+            return !!hit && (hit === el || el.contains(hit));
+          }};
+          const out = (p, hit) => ({{x: Math.round(p[0]), y: Math.round(p[1]),
+                                     w: Math.round(box.width), h: Math.round(box.height), vw, vh, hit}});
+          for (const r of lines.length ? lines : [box]) {{
+            const p = centre(r);
+            if (lands(p[0], p[1])) return out(p, true);
+          }}
+          return out(centre(lines[0] || box), false);
         }})()"""
     )
 
@@ -61,7 +81,8 @@ def click(session: Session, index: int, element: Element, page: Page) -> str:
             "Input.dispatchMouseEvent",
             {"type": kind, "x": x, "y": y, "button": "left", "clickCount": 1, "buttons": 1 if kind != "mouseReleased" else 0},
         )
-    return f"click [{index}] {element.name[:60]!r} at ({x},{y})"
+    covered = "" if rect.get("hit", True) else " (something covers it there)"
+    return f"click [{index}] {element.name[:60]!r} at ({x},{y}){covered}"
 
 
 def focus(session: Session, index: int) -> bool:
