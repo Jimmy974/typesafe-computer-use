@@ -6,6 +6,7 @@ import base64
 import io
 import json
 import os
+import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -216,9 +217,17 @@ CREDENTIAL_HINTS = (
 )
 
 
+# Short hints hide inside ordinary words ("pin" in shipping and topping, "otp" in hotpot), so
+# they count only as a word of their own. The longer ones stay substrings: `confirmPassword`.
+WHOLE_WORD_HINTS = frozenset({"otp", "2fa", "mfa", "pin", "cvv", "cvc", "ssn"})
+_WHOLE_WORD = re.compile(r"(?<![a-z0-9])(" + "|".join(sorted(WHOLE_WORD_HINTS)) + r")(?![a-z0-9])")
+
+
 def looks_credential(label: str) -> bool:
     lowered = (label or "").lower()
-    return any(hint in lowered for hint in CREDENTIAL_HINTS)
+    if _WHOLE_WORD.search(lowered):
+        return True
+    return any(hint in lowered for hint in CREDENTIAL_HINTS if hint not in WHOLE_WORD_HINTS)
 
 
 def compose_browser_text(

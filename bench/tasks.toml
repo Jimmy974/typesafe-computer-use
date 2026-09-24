@@ -57,3 +57,11 @@ url = "https://httpbin.org/forms/post"
 goal = "Fill the pizza order form: customer name Jimmy Wong, telephone 12345678, email jimmy@example.com, size Medium, topping Bacon. Then submit the order."
 expect_url = "httpbin.org/post"
 steps = 16
+
+[[task]]
+name = "httpbin-form-data"
+url = "https://httpbin.org/forms/post"
+goal = "Fill the pizza order form with the saved data, then submit the order."
+expect_url = "httpbin.org/post"
+data = "data/pizza.toml"
+steps = 16

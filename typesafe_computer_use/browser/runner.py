@@ -22,10 +22,11 @@ from pathlib import Path
 
 from typesafe_sdk import TypeSafeClient
 
+from ..formdata import FormData
 from ..sites import Site, site_for
 from ..writer import Writer, compose_browser_text, compose_url, looks_credential
 from . import act
-from .decide import Decision, available_actions, decide, field_context, verify_typed
+from .decide import Decision, available_actions, choose_saved, decide, field_context, verify_typed
 from .hands import CdpHands, Hands
 from .perceive import Element, Page, perceive
 from .report import RunFolder, render_payload
@@ -89,18 +90,20 @@ class RunResult:
         }
 
 
-def typing_target(page: Page, chosen: int | None) -> tuple[Element | None, str]:
+def typing_target(page: Page, chosen: int | None, *, strict: bool = False) -> tuple[Element | None, str]:
     """The field to type into, or None and why not.
 
     The field the classifier named, when it named one; otherwise the first field on
-    the page. A credential field is refused whichever way it was reached: the
-    classifier naming it does not make it safe, and falling back to another field
-    would put the text somewhere the classifier did not choose.
+    the page, unless `strict`. A credential field is refused whichever way it was
+    reached: the classifier naming it does not make it safe, and falling back to
+    another field would put the text somewhere the classifier did not choose.
+    Saved values are strict: the first field is often one already filled, and a value
+    that does not belong there would be typed over the one that does.
     """
     named = next((e for e in page.items if e.index == chosen and e.field), None)
-    target = named or next((e for e in page.items if e.field and not e.secret), None)
+    target = named if strict else named or next((e for e in page.items if e.field and not e.secret), None)
     if target is None:
-        return None, "no field"
+        return None, "not a field" if strict else "no field"
     if target.secret or looks_credential(target.label()):
         return None, "refused_credential"
     return target, ""
@@ -157,6 +160,7 @@ def run_goal(
     runfolder: RunFolder | None = None,
     sites: list[Site] | None = None,
     hands: Hands | None = None,
+    data: FormData | None = None,
 ) -> RunResult:
     hands = hands or CdpHands(session)
     result = RunResult(goal=goal, url=str(session.evaluate("location.href") or ""), outcome="incomplete")
@@ -168,6 +172,7 @@ def run_goal(
     pending: Page | None = None
     history: list[str] = []
     noops = 0
+    used: set[str] = set()  # saved fields typed in and matched, so the classifier knows what is left
     repeats = 0  # the same action, in a row, each leaving the page as it was
     last_action: tuple | None = None
     started = time.perf_counter()
@@ -186,7 +191,8 @@ def run_goal(
         site = site_for(page.url, sites or [])
         # Typing and opening an address need free text, which only the writer composes.
         can_write = writer is not None
-        action_criteria = available_actions(page, allow_type=allow_type, can_write=can_write)
+        has_data = bool(data and data.fields)
+        action_criteria = available_actions(page, allow_type=allow_type, can_write=can_write, has_data=has_data)
         element_criteria_map = {str(e.index): e.label() for e in page.items}
 
         t0 = time.perf_counter()
@@ -199,6 +205,8 @@ def run_goal(
             can_write=can_write,
             model=model,
             site_notes=site.notes if site else (),
+            data=data,
+            used=used,
         )
         decide_ms = (time.perf_counter() - t0) * 1000
 
@@ -239,8 +247,23 @@ def run_goal(
             # The classifier picked the action and the field; the writer supplies the
             # text. The field is checked before the writer is asked, so a credential
             # field is refused whatever the text would have been.
-            target, refusal = typing_target(page, decision.chosen_element)
-            text, text_source = ("", refusal) if target is None else resolve_text(writer, goal, page, target, history)
+            saving = data is not None and bool(data.fields)
+            target, refusal = typing_target(page, decision.chosen_element, strict=saving)
+            key = None
+            if target is None:
+                text, text_source = "", refusal
+            elif saving:
+                # With saved values, only they are typed, into the field the classifier named: a
+                # writer asked for a phone number the file does not hold makes one up. A saved field
+                # is typed as written, and named, never shown: the history goes to the classifier.
+                saved = choose_saved(client, goal, target.label(), data, used, model=model)
+                if saved.choice in data.fields and saved.confidence >= min_confidence:
+                    key = saved.choice
+                    text, text_source = data.fields[key], f"data:{key}"
+                else:
+                    text, text_source = "", f"no_saved_fit({saved.choice} {saved.confidence:.2f})"
+            else:
+                text, text_source = resolve_text(writer, goal, page, target, history)
             if target is None or not text:
                 detail = f"type -> {text_source}"
                 noops += 1
@@ -248,13 +271,21 @@ def run_goal(
             else:
                 typed = hands.type_text(int(target.index), text)
                 value_now = act.field_value(session, int(target.index))
-                ok = verify_typed(client, goal, target.label(), text, value_now, model=model)
+                if key is not None:
+                    # Checked here, against the file: the value never goes to the classifier.
+                    ok = 1.0 if value_now is not None and value_now.strip() == text.strip() else 0.0
+                    shown, verdict = f"<{key}>", "matches" if ok else "does not match"
+                else:
+                    ok = verify_typed(client, goal, target.label(), text, value_now, model=model)
+                    shown, verdict = repr(text), f"verify {ok:.2f}"
                 if ok < 0.5:
                     act.clear_field(session, int(target.index))
-                    detail = f"type {text!r} -> verify {ok:.2f}, cleared" + (f" ({typed})" if "FAILED" in typed else "")
+                    detail = f"type {shown} -> {verdict}, cleared" + (f" ({typed})" if "FAILED" in typed else "")
                     noops += 1
                 else:
-                    detail = f"type {text!r} -> verify {ok:.2f}"
+                    detail = f"type {shown} -> {verdict}"
+                    if key is not None:
+                        used.add(key)
         elif kind == "press_enter":
             detail = hands.press("enter")
         elif kind == "press_escape":

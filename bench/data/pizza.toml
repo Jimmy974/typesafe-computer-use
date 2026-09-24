@@ -1,0 +1,11 @@
+# Saved values for the pizza order form at httpbin.org/forms/post (bench/tasks.toml: httpbin-form-data).
+# [fields] are typed as written, and the classifier sees only their names; [choices] it sees, to click.
+
+[fields]
+customer_name = "Jimmy Wong"
+telephone = "12345678"
+email = "jimmy@example.com"
+
+[choices]
+size = "Medium"
+topping = "Bacon"

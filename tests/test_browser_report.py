@@ -170,13 +170,31 @@ def test_render_payload_shows_state_criteria_and_elements():
 # ----------------------------------------------------------------- writer
 @pytest.mark.parametrize(
     "label",
-    ["Password", "Enter your one-time code", "CVV", "Card number", "API key", "PIN", "seed phrase"],
+    [
+        "Password",
+        "Enter your one-time code",
+        "CVV",
+        "Card number",
+        "API key",
+        "PIN",
+        "seed phrase",
+        "confirmPassword",
+        "Card PIN",
+        "card_pin",
+        "Enter OTP",
+        "otp-code",
+        "SSN (last 4)",
+        "2FA code",
+    ],
 )
 def test_credential_guard_catches_dangerous_fields(label):
     assert looks_credential(label)
 
 
-@pytest.mark.parametrize("label", ["Search invoices", "Customer name", "PO number", "Email address"])
+@pytest.mark.parametrize(
+    "label",
+    ["Search invoices", "Customer name", "PO number", "Email address", "Shipping address", "Topping", "Mapping", "Spinach"],
+)
 def test_credential_guard_allows_ordinary_fields(label):
     assert not looks_credential(label)
 

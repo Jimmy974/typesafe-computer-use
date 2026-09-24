@@ -295,6 +295,36 @@ On GitHub, "open the Issues tab and open the issue about similarly named links" 
 steps without `sites/github.com.toml`, deciding on the repository page while the issues list was
 still arriving, and finished in three with it.
 
+### Saved form data
+
+Values you already have go in a file instead of the goal:
+
+```toml
+[fields]    # typed into text fields, exactly as written; the classifier sees only the names
+customer_name = "Jimmy Wong"
+telephone = "12345678"
+
+[choices]   # options to click; the classifier sees these, to match them to a radio or checkbox
+size = "Medium"
+```
+
+```
+uv run clicker-bench loop --url https://httpbin.org/forms/post --data bench/data/pizza.toml \
+  --goal "Fill the pizza order form with the saved data, then submit the order."
+```
+
+When the classifier types into a field, a second, focused question asks which saved field belongs
+in that field, by its label; the code types the value and checks the field holds it, here, instead
+of asking the classifier. So a field's value never reaches TypeSafe, the writer, the history or
+the run folder, only its name. With a data file only saved values are typed, and only into the
+field the classifier named: a writer asked for a value the file does not hold makes one up, and
+the first field on a form is often one already filled. A name that looks like a credential is
+refused when the file is read. In `bench/tasks.toml` a task takes `data = "data/<file>.toml"`.
+
+On the pizza form, three runs each, the goal-only version and the data file both passed 3 of 3;
+a typing step took 1.5 s with the local writer and 0.24 s from the file, and a whole run 7.1 s
+and 3.2 s.
+
 ### Where browser free text comes from
 
 The writer, as above: `compose_browser_text` for a field and `compose_url` for an address,

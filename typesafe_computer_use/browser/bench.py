@@ -31,6 +31,7 @@ from pathlib import Path
 from typesafe_sdk import TypeSafeClient
 
 from .. import config
+from ..formdata import FormData, load_data
 from ..sites import load_sites
 from ..writer import make_writer, provider
 from . import act
@@ -43,7 +44,7 @@ from .runner import run_goal, save
 
 FIXTURE = Path(__file__).resolve().parents[2] / "bench" / "fixture.html"
 TASKS = Path(__file__).resolve().parents[2] / "bench" / "tasks.toml"
-TASK_KEYS = {"name", "url", "goal", "expect_url", "window", "steps"}
+TASK_KEYS = {"name", "url", "goal", "expect_url", "window", "steps", "data"}
 
 TASK = (
     "Search for 'invoice automation' in the search box and submit the search. "
@@ -198,6 +199,12 @@ def benchmark_loop(args: argparse.Namespace) -> int:
         sys.exit(str(e))
     if sites:
         print(f"sites: {', '.join(s.domain for s in sites)} (from {args.sites})")
+    try:
+        data = load_data(Path(args.data)) if args.data else None
+    except (OSError, ValueError) as e:
+        sys.exit(str(e))
+    if data:
+        print(f"data: {len(data.fields)} field(s), {len(data.choices)} choice(s) from {args.data}")
 
     runfolder = RunFolder.create(args.runs) if args.runs else None
     if runfolder is not None:
@@ -224,6 +231,7 @@ def benchmark_loop(args: argparse.Namespace) -> int:
             runfolder=runfolder,
             sites=sites,
             hands=hands,
+            data=data,
         )
 
     s = result.summary()
@@ -267,7 +275,7 @@ def load_tasks(path: Path) -> list[dict]:
     return tasks
 
 
-def run_task(task: dict, hands: str, *, headed: bool, writer, sites, runs: str | None) -> dict:
+def run_task(task: dict, hands: str, *, headed: bool, writer, sites, runs: str | None, data: FormData | None = None) -> dict:
     """One task with one set of hands, in a fresh Chrome. Everything but the hands is shared."""
     url = FIXTURE.as_uri() if task["url"] == "fixture" else task["url"]
     window = tuple(task["window"]) if "window" in task else None
@@ -290,6 +298,7 @@ def run_task(task: dict, hands: str, *, headed: bool, writer, sites, runs: str |
                 runfolder=runfolder,
                 sites=sites,
                 hands=h,
+                data=data,
             )
     except Exception as e:  # a crash is a failed run, and the comparison goes on
         return {
@@ -328,6 +337,10 @@ def cmd_compare(args: argparse.Namespace) -> int:
         sys.exit(f"unknown hands {bad}; choose from {', '.join(HANDS)}")
     if args.only:
         tasks = [t for t in tasks if t["name"] in args.only.split(",")]
+    try:  # a task's data file is relative to the task list, and read before any browser starts
+        datas = {t["name"]: load_data(Path(args.tasks).parent / t["data"]) for t in tasks if "data" in t}
+    except (OSError, ValueError) as e:
+        sys.exit(str(e))
     print(
         f"{len(tasks)} tasks x {len(hands)} hands x {args.repeat} repeat(s); writer: {provider(writer) if writer else 'none'}\n"
     )
@@ -336,7 +349,9 @@ def cmd_compare(args: argparse.Namespace) -> int:
     for task in tasks:
         for r in range(args.repeat):
             for h in hands if r % 2 == 0 else list(reversed(hands)):
-                row = run_task(task, h, headed=args.headed, writer=writer, sites=sites, runs=args.runs)
+                row = run_task(
+                    task, h, headed=args.headed, writer=writer, sites=sites, runs=args.runs, data=datas.get(task["name"])
+                )
                 rows.append(row)
                 mark = "PASS" if row["passed"] else "fail"
                 click = f"{row['click_act_ms_p50']:.0f}ms" if row.get("click_act_ms_p50") is not None else "-"
@@ -375,6 +390,13 @@ def cmd_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _saved_data(state: dict) -> dict:
+    if "saved_fields" not in state and "saved_choices" not in state:
+        return {}
+    data, used = FormData.from_state(state)
+    return {"data": data, "used": used}
+
+
 def cmd_replay(args: argparse.Namespace) -> int:
     """Re-decide a saved step without touching a browser.
 
@@ -405,6 +427,8 @@ def cmd_replay(args: argparse.Namespace) -> int:
             model=args.model,
             # From the saved state, not today's site files, so an edited file cannot make the replay unfaithful.
             site_notes=tuple(step["state"].get("site_notes") or ()),
+            # The saved state holds field names only, which is all the decision reads.
+            **_saved_data(step["state"]),
         )
 
     if step["state"] and decision.state != step["state"]:
@@ -472,6 +496,7 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--runs", default=None, help="write a replayable run folder under this directory")
     q.add_argument("--sites", default="sites", help="folder of <domain>.toml site files (default: ./sites)")
     q.add_argument("--hands", default="cdp", choices=HANDS, help="what carries out clicks, typing and keys")
+    q.add_argument("--data", default=None, help="a .toml of [fields] to type and [choices] to pick, for a form")
     q.set_defaults(func=benchmark_loop)
 
     c = sub.add_parser("compare", help="the same tasks with each set of hands, side by side")

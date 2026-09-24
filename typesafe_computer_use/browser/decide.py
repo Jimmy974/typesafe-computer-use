@@ -13,10 +13,18 @@ from typing import Any
 
 from typesafe_sdk import Choice, ChoiceAnswer, Noul, NoulAnswer, ScoreAnswer, TypeSafeClient
 
+from ..formdata import FormData
 from .perceive import Page
 
 STOP_KINDS = ("done", "none")
 ENTER_KINDS = ("done", "none", "scroll_down", "scroll_up", "wait")
+
+NO_SAVED_VALUE = "none"
+# Said only with a data file, so every other run gets the question it always got.
+SAVED_DATA_RULE = (
+    " saved_fields are values the user supplied for this form, by name; the text is typed for you. "
+    "saved_choices are options to select, by clicking the radio button or checkbox that matches."
+)
 
 # Said only on a site with a file, so every other page gets the question it always got.
 SITE_NOTES_RULE = " The site_notes are facts about this website that hold on every page of it."
@@ -84,7 +92,7 @@ def element_criteria(page: Page) -> dict[str, str]:
     return {str(it.index): it.label() for it in page.items}
 
 
-def available_actions(page: Page, *, allow_type: bool = True, can_write: bool = False) -> dict[str, str]:
+def available_actions(page: Page, *, allow_type: bool = True, can_write: bool = False, has_data: bool = False) -> dict[str, str]:
     """Only offer actions the page can actually carry out.
 
     This is the one place the browser backend can beat the original's design:
@@ -100,7 +108,8 @@ def available_actions(page: Page, *, allow_type: bool = True, can_write: bool = 
         actions["click"] = BROWSER_ACTIONS["click"]
     # An action the caller cannot execute is a guaranteed stall, and the model will
     # pick it at low confidence, which then reads as doubt.
-    if allow_type and page.has_field and can_write:
+    # Saved values are free text too, but the code types them, so they need no writer.
+    if allow_type and page.has_field and (can_write or has_data):
         actions["type_text"] = BROWSER_ACTIONS["type_text"]
     if page.has_field:
         actions["press_enter"] = BROWSER_ACTIONS["press_enter"]
@@ -125,6 +134,8 @@ def base_state(
     *,
     url_catalog: dict[str, str] | None,
     site_notes: tuple[str, ...] = (),
+    data: FormData | None = None,
+    used: set[str] | None = None,
 ) -> dict:
     state = {
         "goal": goal,
@@ -151,6 +162,8 @@ def base_state(
     # Only on a site with a file, so a run on any other page sends the state it always sent.
     if site_notes:
         state["site_notes"] = list(site_notes)
+    if data is not None:
+        state.update(data.state(used or set()))
     return state
 
 
@@ -165,15 +178,19 @@ def decide(
     can_write: bool = False,
     model: str | None = None,
     site_notes: tuple[str, ...] = (),
+    data: FormData | None = None,
+    used: set[str] | None = None,
 ) -> Decision:
-    actions = available_actions(page, allow_type=allow_type, can_write=can_write)
+    actions = available_actions(page, allow_type=allow_type, can_write=can_write, has_data=bool(data and data.fields))
 
     questions: dict[str, Any] = {
         "kind": Choice(
             instructions=(
                 "You are driving a web browser one action at a time. Which single action makes the "
                 "most progress toward the goal right now? Do not repeat the action just taken unless "
-                "the page changed. If the goal is already achieved, choose done." + (SITE_NOTES_RULE if site_notes else "")
+                "the page changed. If the goal is already achieved, choose done."
+                + (SITE_NOTES_RULE if site_notes else "")
+                + (SAVED_DATA_RULE if data is not None else "")
             ),
             criteria=actions,
         ),
@@ -191,7 +208,7 @@ def decide(
             criteria=element_criteria(page),
         )
 
-    state = base_state(goal, page, history, url_catalog=url_catalog, site_notes=site_notes)
+    state = base_state(goal, page, history, url_catalog=url_catalog, site_notes=site_notes, data=data, used=used)
     response = client.system_one(state=state, questions=questions, model=model)
     answers = response.answers
 
@@ -205,6 +222,34 @@ def decide(
         questions=dict(questions),
         answers=serialize_answers(response.answers),
     )
+
+
+def choose_saved(
+    client: TypeSafeClient, goal: str, field_label: str, data: FormData, used: set[str], *, model: str | None = None
+) -> ChoiceAnswer:
+    """Which saved field belongs in the one field already chosen, asked on its own.
+
+    Asked beside the element question, the two were answered apart: the element could be the
+    submit button while the saved field was a phone number. Asked after it, about that field
+    alone, it cannot disagree with the choice of field. Names only, never values.
+    """
+    state = {"goal": goal, "field": field_label, **data.state(used)}
+    question = Choice(
+        instructions=(
+            "This field is about to be typed into. Which saved field belongs in it? Prefer one not yet "
+            "typed. Name 'none' when no saved field is meant for this field."
+        ),
+        criteria=saved_criteria(data, used),
+    )
+    return client.system_one(state=state, questions={"saved": question}, model=model).answers["saved"]
+
+
+def saved_criteria(data: FormData, used: set[str]) -> dict[str, str]:
+    """One option per saved field, by name only, and one for text no saved field holds."""
+    return {
+        **{k: f"the saved value named {k!r}{' (already typed)' if k in used else ''}" for k in data.fields},
+        NO_SAVED_VALUE: "No saved field fits this field; its text has to be composed from the goal.",
+    }
 
 
 def verify_typed(
