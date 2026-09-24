@@ -203,6 +203,8 @@ classifier reads, not in more hand-offs.
 
 ## Browser backend: DOM perception, no OCR
 
+A step-by-step guide in Cantonese, covering forms, data files and batches: [docs/USAGE.zh-HK.md](docs/USAGE.zh-HK.md).
+
 `macos.py` drives whatever is on screen. For the browser there is a second backend that
 never looks at pixels: it reads the DOM over the Chrome DevTools Protocol, so it needs no
 Screen Recording permission and cannot fight you for the cursor. It is opt-in: `clicker`
