@@ -18,6 +18,8 @@ and no element takes its name from it, so a password, a one-time code or a card
 number cannot reach the classifier, the writer, the log or the run folder. The
 only value used is a button input's, which is the button's own label. Fields
 that ask for a credential are marked `secret`, and nothing is typed into them.
+What does leave a field is one bit, `filled`: whether it holds anything, so a
+form's progress can be read without its contents. A credential field has none.
 """
 
 from __future__ import annotations
@@ -41,6 +43,22 @@ INTERACTIVE_JS = r"""
   const BUTTON_TYPES = new Set(["submit","button","reset"]);
   // Autocomplete tokens for credentials and payment data (WHATWG autofill field names).
   const SECRET_AUTOCOMPLETE = /(^|\s)(current-password|new-password|one-time-code|cc-number|cc-csc|cc-exp|cc-exp-month|cc-exp-year)(\s|$)/;
+  const CHECKABLE_ROLES = new Set(["checkbox","radio","switch","menuitemcheckbox","menuitemradio"]);
+  // The caption the page wrote for a control: what aria-labelledby points at, else its <label>s,
+  // wrapping it or naming it with for=. The controls inside a label are taken out first, so a
+  // caption never carries a field's text or a list's options.
+  const caption = (el) => {
+    const parts = (el.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)
+      .map(id => document.getElementById(id)).filter(Boolean).map(n => n.innerText || "");
+    if (!parts.join("").trim() && el.labels) {
+      for (const lab of el.labels) {
+        const copy = lab.cloneNode(true);
+        copy.querySelectorAll("input,select,textarea,button").forEach(n => n.remove());
+        parts.push(copy.textContent || "");
+      }
+    }
+    return parts.join(" ").replace(/\s+/g, " ").trim();
+  };
   const vw = window.innerWidth, vh = window.innerHeight;
   const out = [];
   const seen = new Set();
@@ -63,7 +81,7 @@ INTERACTIVE_JS = r"""
     const secret = type === "password" ||
       SECRET_AUTOCOMPLETE.test((el.getAttribute("autocomplete") || "").toLowerCase());
     const field = el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && TEXT_TYPES.has(type));
-    let name = (el.getAttribute("aria-label") || el.getAttribute("placeholder") ||
+    let name = (el.getAttribute("aria-label") || caption(el) || el.getAttribute("placeholder") ||
                 el.getAttribute("title") || el.getAttribute("alt") || "").trim();
     // Never a text control's value or its own text: that is what the user typed.
     const typedInto = field || el.isContentEditable || role === "textbox" || role === "searchbox";
@@ -79,12 +97,16 @@ INTERACTIVE_JS = r"""
     const y = Math.round(r.top + r.height / 2);
     const top = document.elementFromPoint(Math.max(0, Math.min(x, vw - 1)), Math.max(0, Math.min(y, vh - 1)));
     const covered = !!(top && !el.contains(top) && !top.contains(el));
+    const checkable = type === "checkbox" || type === "radio" || CHECKABLE_ROLES.has(role);
+    const checked = checkable ? (el.checked === true || el.getAttribute("aria-checked") === "true") : null;
+    // Whether a text control holds anything; never what. Not even that much for a credential field.
+    const filled = typedInto && !secret ? String(el.value ?? el.innerText ?? "").length > 0 : null;
     el.setAttribute("data-tscu", String(sid));
     out.push({sid, tag: el.tagName.toLowerCase(), role: role || type,
               name, x, y, w: Math.round(r.width), h: Math.round(r.height),
               in_view: true, covered,
               href: el.tagName === "A" ? (el.href || "") : "",
-              field, secret});
+              field, secret, checked, filled});
     sid++;
   }
   out.sort((a, b) => (Math.abs(a.y - b.y) > 8 ? a.y - b.y : a.x - b.x));
@@ -119,13 +141,22 @@ class Element:
     href: str
     field: bool = False  # takes free text
     secret: bool = False  # asks for a password, a one-time code or card data: never typed into
+    checked: bool | None = None  # a checkbox, radio or switch: whether it is on; None for anything else
+    filled: bool | None = None  # a text control: whether it holds anything, never what; None otherwise
 
     @property
     def typeable(self) -> bool:
         return self.field and not self.secret
 
     def label(self) -> str:
-        bits = [f"<{self.tag}>", repr(self.name)]
+        bits = [f"<{self.tag}>"]
+        if self.role and self.role != self.tag:
+            bits.append(self.role)  # an <input> says nothing; radio, checkbox or email says how to use it
+        bits.append(repr(self.name))
+        if self.checked is not None:
+            bits.append("checked" if self.checked else "not checked")
+        if self.filled is not None:
+            bits.append("filled" if self.filled else "empty")
         if self.href:
             bits.append(self.href[:70])
         if self.secret:
@@ -164,24 +195,7 @@ def perceive(session: Any, *, budget: int = 120) -> Page:
     start = time.perf_counter()
     data = session.evaluate(INTERACTIVE_JS) or {}
     elapsed = (time.perf_counter() - start) * 1000
-    items = [
-        Element(
-            index=int(it.get("index", i)),
-            tag=str(it.get("tag", "")),
-            role=str(it.get("role", "")),
-            name=str(it.get("name", "")),
-            x=int(it.get("x", 0)),
-            y=int(it.get("y", 0)),
-            w=int(it.get("w", 0)),
-            h=int(it.get("h", 0)),
-            in_view=bool(it.get("in_view", True)),
-            covered=bool(it.get("covered", False)),
-            href=str(it.get("href", "")),
-            field=bool(it.get("field", False)),
-            secret=bool(it.get("secret", False)),
-        )
-        for i, it in enumerate((data.get("items") or [])[:budget])
-    ]
+    items = [element_from(it, i) for i, it in enumerate((data.get("items") or [])[:budget])]
     return Page(
         url=str(data.get("url", "")),
         title=str(data.get("title", "")),
@@ -197,6 +211,31 @@ def perceive(session: Any, *, budget: int = 120) -> Page:
         scroll_max=int(data.get("scroll_max", 0)),
         candidates=int(data.get("candidates", 0)),
         below_fold=int(data.get("below_fold", 0)),
+    )
+
+
+def _maybe_bool(value: Any) -> bool | None:
+    return None if value is None else bool(value)
+
+
+def element_from(it: dict, i: int = 0) -> Element:
+    """One element from the page script's record, or from a saved run folder's."""
+    return Element(
+        index=int(it.get("index", i)),
+        tag=str(it.get("tag", "")),
+        role=str(it.get("role", "")),
+        name=str(it.get("name", "")),
+        x=int(it.get("x", 0)),
+        y=int(it.get("y", 0)),
+        w=int(it.get("w", 0)),
+        h=int(it.get("h", 0)),
+        in_view=bool(it.get("in_view", True)),
+        covered=bool(it.get("covered", False)),
+        href=str(it.get("href", "")),
+        field=bool(it.get("field", False)),
+        secret=bool(it.get("secret", False)),
+        checked=_maybe_bool(it.get("checked")),
+        filled=None if it.get("secret") else _maybe_bool(it.get("filled")),
     )
 
 

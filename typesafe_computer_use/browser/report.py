@@ -14,7 +14,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from .perceive import Element, Page
+from .perceive import Page, element_from
 
 RULE = "=" * 78
 
@@ -138,24 +138,7 @@ def render_payload(
 
 def page_from_elements(data: dict) -> Page:
     """Rebuild a Page from a saved `step-NN-elements.json`."""
-    items = [
-        Element(
-            index=int(it["index"]),
-            tag=str(it["tag"]),
-            role=str(it.get("role", "")),
-            name=str(it["name"]),
-            x=int(it["x"]),
-            y=int(it["y"]),
-            w=int(it["w"]),
-            h=int(it["h"]),
-            in_view=bool(it.get("in_view", True)),
-            covered=bool(it.get("covered", False)),
-            href=str(it.get("href", "")),
-            field=bool(it.get("field", False)),
-            secret=bool(it.get("secret", False)),
-        )
-        for it in data.get("items", [])
-    ]
+    items = [element_from(it) for it in data.get("items", [])]
     return Page(
         url=str(data.get("url", "")),
         title=str(data.get("title", "")),

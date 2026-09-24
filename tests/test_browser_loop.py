@@ -185,10 +185,11 @@ def test_a_password_value_never_leaves_the_page(tmp_path):
 
 
 def test_the_page_script_never_reads_what_was_typed():
-    """The script reads `el.value` once, for a button input's label, and never names a text
-    control after its own contents."""
-    assert INTERACTIVE_JS.count("el.value") == 1
+    """The script reads `el.value` twice: for a button input's label, and to say whether a field
+    holds anything, as one boolean. It never names a text control after its own contents."""
+    assert INTERACTIVE_JS.count("el.value") == 2
     assert "BUTTON_TYPES.has(type) ? el.value" in INTERACTIVE_JS
+    assert 'typedInto && !secret ? String(el.value ?? el.innerText ?? "").length > 0 : null' in INTERACTIVE_JS
     assert "value:" not in INTERACTIVE_JS
 
 
@@ -308,3 +309,30 @@ def test_different_actions_that_change_nothing_are_not_a_repeat(tmp_path):
     client = FakeTypeSafe(("click", "2"), ("scroll_down", None), ("click", "2"), ("scroll_down", None))
     result, _ = run(FakeBrowser(login_page()), client, tmp_path, steps=4)
     assert result.outcome != "stalled"
+
+
+def form_page():
+    """A form as a page script would report it: labelled radios, a checkbox, a filled field."""
+    items = [
+        item(0, "Customer name", role="text", filled=True),
+        item(1, "Medium", role="radio", field=False, checked=False),
+        item(2, "Bacon", role="checkbox", field=False, checked=True),
+    ]
+    return {**login_page(), "url": "https://example.test/form", "items": items, "count": 3}
+
+
+def test_the_classifier_is_told_how_each_control_is_used_and_where_it_stands():
+    state = base_state("g", perceive(FakeBrowser(form_page())), [], url_catalog=None)
+    name, medium, bacon = state["elements"]
+    assert (name["type"], name["filled"]) == ("text", True) and "checked" not in name
+    assert (medium["type"], medium["text"], medium["checked"]) == ("radio", "Medium", False)
+    assert bacon["checked"] is True and "filled" not in bacon
+    assert element_criteria(perceive(FakeBrowser(form_page())))["1"] == "<input> radio 'Medium' not checked"
+
+
+def test_a_credential_field_says_nothing_about_what_it_holds():
+    page = login_page()
+    page["items"][1]["filled"] = True  # whatever a page script claims
+    password = base_state("g", perceive(FakeBrowser(page)), [], url_catalog=None)["elements"][1]
+    assert "filled" not in password
+

@@ -134,11 +134,15 @@ def base_state(
             {
                 "i": it.index,
                 "tag": it.tag,
+                # radio, checkbox, email, time...: an <input> alone does not say whether to click it or type
+                **({"type": it.role} if it.role and it.role != it.tag else {}),
                 "text": it.name,
                 "href": it.href[:120] or None,
                 "visible": it.in_view,
                 "covered": it.covered,
                 "credential_field": it.secret or None,
+                **({"checked": it.checked} if it.checked is not None else {}),
+                **({"filled": it.filled} if it.filled is not None else {}),
             }
             for it in page.items
         ],

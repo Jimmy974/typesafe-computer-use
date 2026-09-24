@@ -178,7 +178,8 @@ def wait_for_load(session: Session, *, timeout_ms: int = 15000, settle_ms: int =
 
 def fingerprint(page: Page) -> tuple:
     """Cheap identity for 'is this still the same page?'."""
-    return (page.url, page.title, page.scroll_y, tuple((e.index, e.name, e.x, e.y) for e in page.items))
+    # Checking a box or filling a field changes the page as much as a new link does.
+    return (page.url, page.title, page.scroll_y, tuple((e.index, e.name, e.x, e.y, e.checked, e.filled) for e in page.items))
 
 
 def observe_until_changed(
