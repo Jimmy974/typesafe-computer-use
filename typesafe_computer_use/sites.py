@@ -6,6 +6,9 @@ options that mean the same thing read as doubt. So a site file adds facts, not c
 - `notes` join the classifier's state while the page is on that site, as `site_notes`
 - `settle_ms` is how long to keep watching after an action changed the page, for a site that
   renders in stages (a client-side route change first repaints the tab, then swaps the page)
+- `avoid` names controls that are never offered, such as a button that abandons the work in
+  progress: a note asks the classifier, and a doubtful step can still pick it; left out of the
+  element list, it cannot be picked at all. A name matches whole, ignoring case and spacing.
 
     domain = "github.com"
     settle_ms = 1500
@@ -23,7 +26,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 MAX_SETTLE_MS = 10_000  # a slower site needs `wait`, which the classifier chooses and the history shows
-KEYS = {"domain", "notes", "settle_ms"}
+KEYS = {"domain", "notes", "settle_ms", "avoid"}
 
 
 @dataclass(frozen=True)
@@ -32,6 +35,14 @@ class Site:
     notes: tuple[str, ...] = ()
     settle_ms: int = 0
     source: str = ""  # the file it came from, for the log
+    avoid: tuple[str, ...] = ()  # control names never offered, compared by `_plain`
+
+    def avoids(self, name: str) -> bool:
+        return _plain(name) in self.avoid
+
+
+def _plain(name: str) -> str:
+    return " ".join(name.split()).casefold()
 
 
 def parse_site(data: dict, source: str = "") -> Site:
@@ -48,7 +59,16 @@ def parse_site(data: dict, source: str = "") -> Site:
     settle = data.get("settle_ms", 0)
     if not isinstance(settle, int) or isinstance(settle, bool) or not 0 <= settle <= MAX_SETTLE_MS:
         raise ValueError(f"{source}: settle_ms must be a whole number from 0 to {MAX_SETTLE_MS}")
-    return Site(domain=domain.strip().lower(), notes=tuple(n.strip() for n in notes), settle_ms=settle, source=source)
+    avoid = data.get("avoid", [])
+    if not isinstance(avoid, list) or not all(isinstance(n, str) and n.strip() for n in avoid):
+        raise ValueError(f"{source}: avoid must be a list of non-empty control names")
+    return Site(
+        domain=domain.strip().lower(),
+        notes=tuple(n.strip() for n in notes),
+        settle_ms=settle,
+        source=source,
+        avoid=tuple(_plain(n) for n in avoid),
+    )
 
 
 def load_sites(folder: Path) -> list[Site]:

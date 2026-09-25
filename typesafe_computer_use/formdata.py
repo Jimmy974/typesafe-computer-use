@@ -7,6 +7,9 @@
     [choices]   # options to click; the classifier sees these, to match them to the page
     size = "Medium"
 
+    [files]     # files to upload; put into the page's file inputs by the code, never asked about
+    photo = "mydata/docs/photo.jpg"
+
 For a text field the classifier chooses which saved value fits, by name, and the code types the
 value itself: no model composes it, so it arrives unchanged, and it never leaves this machine.
 The check after typing compares the field with the value here, instead of asking the classifier.
@@ -23,13 +26,14 @@ from pathlib import Path
 
 from .writer import looks_credential
 
-SECTIONS = {"fields", "choices"}
+SECTIONS = {"fields", "choices", "files"}
 
 
 @dataclass(frozen=True)
 class FormData:
     fields: dict[str, str] = field(default_factory=dict)
     choices: dict[str, str] = field(default_factory=dict)
+    files: dict[str, str] = field(default_factory=dict)  # name -> absolute path of a file that exists
 
     def state(self, used: set[str]) -> dict:
         """What the classifier reads: every field's name and whether it is typed in yet, never its
@@ -53,7 +57,7 @@ class FormData:
 def parse_data(data: dict, source: str = "") -> FormData:
     unknown = set(data) - SECTIONS
     if unknown:
-        raise ValueError(f"{source}: unknown section(s) {', '.join(sorted(unknown))}; expected [fields] and [choices]")
+        raise ValueError(f"{source}: unknown section(s) {', '.join(sorted(unknown))}; expected [fields], [choices] and [files]")
     out = {}
     for section in SECTIONS:
         table = data.get(section, {})
@@ -67,9 +71,14 @@ def parse_data(data: dict, source: str = "") -> FormData:
                 raise ValueError(f"{source}: {section}.{key} looks like a credential; passwords and codes are never typed")
             values[key] = str(value)
         out[section] = values
-    if not out["fields"] and not out["choices"]:
-        raise ValueError(f"{source}: no values in [fields] or [choices]")
-    return FormData(fields=out["fields"], choices=out["choices"])
+    for key, value in out["files"].items():
+        path = Path(value).expanduser()
+        if not path.is_file():
+            raise ValueError(f"{source}: files.{key}: no file at {value}")
+        out["files"][key] = str(path.resolve())
+    if not out["fields"] and not out["choices"] and not out["files"]:
+        raise ValueError(f"{source}: no values in [fields], [choices] or [files]")
+    return FormData(fields=out["fields"], choices=out["choices"], files=out["files"])
 
 
 def load_data(path: Path) -> FormData:

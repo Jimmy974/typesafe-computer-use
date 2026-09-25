@@ -253,3 +253,13 @@ def endpoint():
     yield SimpleNamespace(url=f"http://127.0.0.1:{server.server_port}", seen=seen, state=state)
     server.shutdown()
     server.server_close()
+
+
+@pytest.fixture(autouse=True)
+def _short_page_waits(monkeypatch):
+    """The loop's `wait` and a code's check watch a real page for seconds; a fake one never changes."""
+    from typesafe_computer_use.browser import form_login, runner
+
+    monkeypatch.setattr(runner, "WAIT_MS", 20)
+    quick = form_login.wait_for_otp_result
+    monkeypatch.setattr(runner, "wait_for_otp_result", lambda *a, **kw: quick(*a, **{**kw, "timeout_ms": 20}))

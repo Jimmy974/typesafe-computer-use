@@ -23,7 +23,8 @@ NO_SAVED_VALUE = "none"
 # Said only with a data file, so every other run gets the question it always got.
 SAVED_DATA_RULE = (
     " saved_fields are values the user supplied for this form, by name; the text is typed for you. "
-    "saved_choices are options to select, by clicking the radio button or checkbox that matches."
+    "saved_choices are options to select: click the radio button or checkbox that matches, or "
+    "choose it in a dropdown list."
 )
 
 # Said only on a site with a file, so every other page gets the question it always got.
@@ -33,7 +34,8 @@ SITE_NOTES_RULE = " The site_notes are facts about this website that hold on eve
 BROWSER_ACTIONS: dict[str, str] = {
     "click": (
         "Click one of the on-screen elements. This is how you follow a link, press a button, "
-        "open a menu, or select a tab. Choose the element in the element question."
+        "open a menu, or select a tab. Choose the element in the element question. Not for "
+        "filling a text field: that is type_text."
     ),
     "type_text": (
         "Type free text into a text field — a search box, a form input, a username. Name the field "
@@ -41,6 +43,10 @@ BROWSER_ACTIONS: dict[str, str] = {
     ),
     "navigate": (
         "Open the website the goal is about in this tab, by address. Not for clicking an on-screen link: use click for that."
+    ),
+    "select_option": (
+        "Choose one option in a dropdown list (a select element). Name the list in the element "
+        "question; which option is asked next. Not for a radio button or checkbox: click those."
     ),
     "press_enter": "Press Return to submit the form or field that currently has focus.",
     "press_escape": "Press Escape to dismiss a dialog, popup, or dropdown.",
@@ -111,12 +117,15 @@ def available_actions(page: Page, *, allow_type: bool = True, can_write: bool = 
     # Saved values are free text too, but the code types them, so they need no writer.
     if allow_type and page.has_field and (can_write or has_data):
         actions["type_text"] = BROWSER_ACTIONS["type_text"]
+    if any(it.tag == "select" for it in page.items):
+        actions["select_option"] = BROWSER_ACTIONS["select_option"]
     if page.has_field:
         actions["press_enter"] = BROWSER_ACTIONS["press_enter"]
     if can_write:
         actions["navigate"] = BROWSER_ACTIONS["navigate"]
     actions["press_escape"] = BROWSER_ACTIONS["press_escape"]
-    if page.can_scroll:
+    # A form in its own scrolling box leaves the page itself unscrollable, with controls below the fold.
+    if page.can_scroll or page.below_fold:
         actions["scroll_down"] = BROWSER_ACTIONS["scroll_down"]
         actions["scroll_up"] = BROWSER_ACTIONS["scroll_up"]
     if page.history_len > 1:
@@ -154,11 +163,18 @@ def base_state(
                 "credential_field": it.secret or None,
                 **({"checked": it.checked} if it.checked is not None else {}),
                 **({"filled": it.filled} if it.filled is not None else {}),
+                **({"chosen": it.chosen or None} if it.tag == "select" else {}),
+                **({"invalid": True} if it.invalid else {}),
+                **({"section": it.section} if it.section else {}),
+                **({"question": it.group} if it.group else {}),
             }
             for it in page.items
         ],
         "known_sites": url_catalog or None,
     }
+    # Only when the page shows one, so a quiet page sends the state it always sent.
+    if page.messages:
+        state["page_messages"] = list(page.messages)
     # Only on a site with a file, so a run on any other page sends the state it always sent.
     if site_notes:
         state["site_notes"] = list(site_notes)
@@ -202,7 +218,8 @@ def decide(
     if page.items:
         questions["element"] = Choice(
             instructions=(
-                "If the right next move is to click an element or type into a field, which element? "
+                "If the right next move is to click an element, type into a field or choose in a dropdown "
+                "list, which element? "
                 "Prefer an element that is on screen and not covered by an overlay."
             ),
             criteria=element_criteria(page),
@@ -237,11 +254,49 @@ def choose_saved(
     question = Choice(
         instructions=(
             "This field is about to be typed into. Which saved field belongs in it? Prefer one not yet "
-            "typed. Name 'none' when no saved field is meant for this field."
+            "typed. A saved field whose name starts with a section and a colon, such as 'Guardian: First Name', "
+            "goes only in a field under that section; every other saved field goes in fields outside those "
+            "sections. Name 'none' when no saved field is meant for this field."
         ),
         criteria=saved_criteria(data, used),
     )
     return client.system_one(state=state, questions={"saved": question}, model=model).answers["saved"]
+
+
+def choose_option(
+    client: TypeSafeClient,
+    goal: str,
+    list_label: str,
+    options: list[tuple[int, str]],
+    history: list[str],
+    *,
+    choices: dict[str, str] | None = None,
+    model: str | None = None,
+) -> ChoiceAnswer:
+    """Which option of the one dropdown list already chosen, asked on its own, as choose_saved is.
+
+    A data file's choices are shown, as they are for a radio button: the option names one of them."""
+    state = {"goal": goal, "list": list_label, "previous_actions": history[-8:]}
+    if choices:
+        state["saved_choices"] = dict(choices)
+    criteria = {str(i): text for i, text in options}
+    if choices:
+        # With saved values, the one meant for this list may be missing from it, as when an earlier
+        # answer changed what the list offers: saying so beats taking whatever is first.
+        criteria[NO_SAVED_VALUE] = "None of these options is the saved value meant for this list."
+    question = Choice(
+        instructions=(
+            "This dropdown list is about to be set. Which option does the goal call for?"
+            + (
+                " When saved_choices hold a value for this list, choose the option that matches it; when "
+                "that value is not among the options, choose none."
+                if choices
+                else ""
+            )
+        ),
+        criteria=criteria,
+    )
+    return client.system_one(state=state, questions={"option": question}, model=model).answers["option"]
 
 
 def saved_criteria(data: FormData, used: set[str]) -> dict[str, str]:

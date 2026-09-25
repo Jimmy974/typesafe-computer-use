@@ -309,7 +309,49 @@ Chrome pauses only that host's requests, and answers a login challenge only when
 the server, over https, from exactly that host; every other challenge is cancelled, and a wrong
 password is answered three times and then left to fail. The password goes only into that answer:
 never a header on every request, a URL, the state, the log or the run folder. It applies to
-`perception`, `loop`, `compare` and `batch`. A site's own login page is still never filled in.
+`perception`, `loop`, `compare` and `batch`. Other sites' own login pages are left untouched;
+the one host named for form login, described next, is the narrow exception.
+
+### Form login
+
+A site's own username/password form can be filled in for you on one host, named in the local
+`.env` next to the credentials, separately from the outer Basic Auth line:
+
+```
+CLICKER_FORM_LOGIN=preprod.example.com username:password
+```
+
+The host is a bare name, as in `CLICKER_BASIC_AUTH`; the password may hold colons. The browser
+submits the credentials only when it finds one unambiguous username field and one password field
+on exactly that HTTPS host. A real `<form>` must also post to that host; a sign-in box without
+one, which the site's own script sends, is submitted by pressing its one Log in or Sign in button
+below the fields. This is checked on the
+first page and again whenever a password field appears later, such as in a dialog a Login button
+opens. The credentials never enter TOML, classifier state, logs or run folders. In a headed run
+with an interactive terminal, an MFA, CAPTCHA or ambiguous form pauses for you to handle it in the
+browser and press Enter; a rejected login stops the run. Other hosts' login forms remain
+untouched.
+
+A preprod site that accepts a fixed one-time code after sign-in takes it from one more line:
+
+```
+CLICKER_FORM_OTP=123456
+```
+
+It is typed only on the `CLICKER_FORM_LOGIN` host, into a field that says it takes the code or a
+row of one-letter boxes as long as the code, and its Verify button is pressed. The classifier never
+sees the code, and those boxes, which often have no name, are found without it. A code the site
+turns down stops the run. A real site sends a new code each time: leave this unset there.
+
+Run with a visible browser window so you can handle a manual checkpoint if one appears:
+
+```sh
+uv run clicker-bench loop --url https://preprod.example.com/ \
+  --headed --keep-open --goal "Log in and start a new application"
+```
+
+`--keep-open` leaves the window up after the run, so you can see where it stopped or carry on by
+hand: press Enter in the terminal to close it, or, with no terminal to read from, quit Chrome.
 
 ### Saved form data
 
@@ -551,8 +593,9 @@ the user said, once there are any:
   screen is captured again first. This one call uses `CLICKER_ANSWER_MODEL`, a stronger
   reader than the per-step writer.
 
-Passwords are never typed. Rely on the browser's password manager or an SSO button
-the OCR can read.
+The normal form loop never types passwords. The one-host form login described above is
+the only exception; for other sites, rely on the browser's password manager or an SSO button the
+OCR can read.
 
 ## Run folder
 

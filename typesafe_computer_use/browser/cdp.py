@@ -187,6 +187,8 @@ class Session:
         the loop makes one every few milliseconds while a page loads."""
         self._handlers[event] = handler
 
+    dialogs: list[str]  # what each JavaScript dialog said, once `answer_dialogs` is on
+
     def send(self, method: str, params: dict | None = None) -> None:
         """Send without waiting for the reply, which the read loop then drops."""
         self._id += 1
@@ -198,7 +200,12 @@ class Session:
         msg_id = self._id
         self._ws.send(json.dumps({"id": msg_id, "method": method, "params": params or {}}))
         while True:
-            raw = self._ws.recv()
+            try:
+                raw = self._ws.recv()
+            except websocket.WebSocketTimeoutException as e:
+                # The page is holding the browser, as while it hands over to another site. The
+                # socket still works; a late reply to this call is skipped by its id.
+                raise CDPError(f"{method}: no answer in {self.timeout:.0f}s") from e
             if not raw:
                 raise CDPError("websocket closed")
             data = json.loads(raw)
@@ -278,3 +285,19 @@ def enable_basic_auth(session: Session, host: str, username: str, password: str)
     session.on("Fetch.requestPaused", paused)
     session.on("Fetch.authRequired", challenged)
     session.call("Fetch.enable", {"handleAuthRequests": True, "patterns": [{"urlPattern": f"https://{host}/*"}]})
+
+
+def answer_dialogs(session: Session) -> None:
+    """Close each JavaScript dialog the page opens, and keep what it said in `session.dialogs`.
+
+    An open dialog holds every input event, so the next click or scroll waits on it until the
+    socket times out. An alert has only OK, which is pressed. A confirm, a prompt or a leave-page
+    question is cancelled: an unattended run does not say yes to "Submit now?" on its own."""
+    session.dialogs = []
+
+    def opened(params: dict) -> None:
+        kind = str(params.get("type") or "dialog")
+        session.dialogs.append(f"{kind}: {str(params.get('message') or '')[:160]}")
+        session.send("Page.handleJavaScriptDialog", {"accept": kind == "alert"})
+
+    session.on("Page.javascriptDialogOpening", opened)

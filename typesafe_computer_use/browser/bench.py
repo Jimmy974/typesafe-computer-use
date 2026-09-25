@@ -36,7 +36,7 @@ from ..scenarios import load_scenarios
 from ..sites import load_sites
 from ..writer import make_writer, provider
 from . import act
-from .cdp import Chrome, Session, enable_basic_auth
+from .cdp import Chrome, Session, answer_dialogs, enable_basic_auth
 from .decide import decide
 from .hands import HANDS, CdpHands, PlaywrightHands
 from .perceive import perceive
@@ -207,9 +207,24 @@ def benchmark_loop(args: argparse.Namespace) -> int:
     if data:
         print(f"data: {len(data.fields)} field(s), {len(data.choices)} choice(s) from {args.data}")
 
+    if args.keep_open and not args.headed:
+        sys.exit("--keep-open needs --headed: there is no window to keep")
+
     runfolder = RunFolder.create(args.runs) if args.runs else None
     if runfolder is not None:
         print(f"run folder: {runfolder.root}")
+
+    manual_login_callback = None
+    if args.headed and sys.stdin.isatty():
+
+        def prompt_manual_login() -> bool:
+            try:
+                input("\nLogin checkpoint: complete the sign-in in the browser, then press Enter to resume: ")
+            except EOFError:
+                return False
+            return True
+
+        manual_login_callback = prompt_manual_login
 
     with (
         Chrome(headed=args.headed) as chrome,
@@ -227,35 +242,56 @@ def benchmark_loop(args: argparse.Namespace) -> int:
             start_url=url,
             max_steps=args.steps,
             min_confidence=args.min_confidence,
+            done_text=args.done_text,
             model=args.model,
             writer=writer,
             runfolder=runfolder,
             sites=sites,
             hands=hands,
             data=data,
+            manual_login=manual_login_callback,
         )
+        # Printed before Chrome closes, so a window kept open sits under its result.
+        s = result.summary()
+        print("-" * 118)
+        print(f"outcome: {result.outcome}   steps: {s.get('steps')}   wall: {result.wall_ms:.0f}ms")
+        if s.get("steps"):
+            print(
+                f"per-step  perceive p50 {s['perceive_ms']['p50']}ms   decide p50 {s['decide_ms']['p50']}ms   "
+                f"act p50 {s['act_ms']['p50']}ms   TOTAL p50 {s['total_ms']['p50']}ms"
+            )
+            print(
+                f"          -> {s['steps_per_sec_p50']} steps/sec (p50)   p95 {s['total_ms']['p95']}ms   min {s['total_ms']['min']}ms"
+            )
+            print(f"          -> {s['steps_per_sec_excluding_cold_start']} steps/sec excluding the cold-start step")
+        if args.keep_open:
+            wait_for_close(chrome)
 
-    s = result.summary()
-    print("-" * 118)
-    print(f"outcome: {result.outcome}   steps: {s.get('steps')}   wall: {result.wall_ms:.0f}ms")
-    if s.get("steps"):
-        print(
-            f"per-step  perceive p50 {s['perceive_ms']['p50']}ms   decide p50 {s['decide_ms']['p50']}ms   "
-            f"act p50 {s['act_ms']['p50']}ms   TOTAL p50 {s['total_ms']['p50']}ms"
-        )
-        print(
-            f"          -> {s['steps_per_sec_p50']} steps/sec (p50)   p95 {s['total_ms']['p95']}ms   min {s['total_ms']['min']}ms"
-        )
-        print(f"          -> {s['steps_per_sec_excluding_cold_start']} steps/sec excluding the cold-start step")
     if args.out:
         save(result, Path(args.out))
         print(f"saved: {args.out}")
     return 0
 
 
+def wait_for_close(chrome: Chrome) -> None:
+    """--keep-open: leave the window up after the run until the person is done with it.
+
+    Enter closes it from a terminal. Without one, as when an agent runs the command, it stays until
+    Chrome is quit (closing its last window on a Mac does not quit it)."""
+    if sys.stdin.isatty():
+        with contextlib.suppress(EOFError, KeyboardInterrupt):
+            input("\nbrowser left open: press Enter to close it ")
+        return
+    print("\nbrowser left open: quit Chrome (Cmd+Q) to end the run", flush=True)
+    with contextlib.suppress(KeyboardInterrupt):
+        while chrome.proc is not None and chrome.proc.poll() is None:
+            time.sleep(0.5)
+
+
 def attach(chrome: Chrome) -> Session:
     """A session on Chrome's page, answering basic auth for the host CLICKER_BASIC_AUTH names, if any."""
     session = chrome.attach()
+    answer_dialogs(session)
     if credentials := config.basic_auth():
         enable_basic_auth(session, *credentials)
     return session
@@ -302,6 +338,8 @@ def run_task(task: dict, hands: str, *, headed: bool, writer, sites, runs: str |
                 task["goal"],
                 start_url=url,
                 max_steps=int(task.get("steps", 12)),
+                min_confidence=float(task.get("min_confidence", 0.4)),
+                done_text=task.get("done_text"),
                 verbose=False,
                 writer=writer,
                 runfolder=runfolder,
@@ -409,7 +447,10 @@ def cmd_batch(args: argparse.Namespace) -> int:
     """
     _require_key()
     try:
-        scenarios = load_scenarios(Path(args.file), defaults={"url": args.url, "goal": args.goal, "expect_url": args.expect_url})
+        scenarios = load_scenarios(
+            Path(args.file),
+            defaults={"url": args.url, "goal": args.goal, "expect_url": args.expect_url, "min_confidence": args.min_confidence},
+        )
         sites = load_sites(Path(args.sites))
         writer = make_writer()
     except (OSError, ValueError) as e:
@@ -424,7 +465,15 @@ def cmd_batch(args: argparse.Namespace) -> int:
     rows: list[dict] = []
     try:
         for n, sc in enumerate(scenarios, 1):
-            task = {"name": sc.name, "url": sc.url, "goal": sc.goal, "expect_url": sc.expect_url, "steps": sc.steps}
+            task = {
+                "name": sc.name,
+                "url": sc.url,
+                "goal": sc.goal,
+                "expect_url": sc.expect_url,
+                "steps": sc.steps,
+                "min_confidence": sc.min_confidence,
+                "done_text": sc.done_text,
+            }
             row = run_task(task, "cdp", headed=args.headed, writer=writer, sites=sites, runs=args.runs, data=sc.data)
             row.pop("hands", None)
             row.pop("click_act_ms_p50", None)
@@ -552,6 +601,8 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--min-confidence", type=float, default=0.4)
     q.add_argument("--model", default=None)
     q.add_argument("--headed", action="store_true")
+    q.add_argument("--keep-open", action="store_true", help="with --headed: leave the browser open after the run")
+    q.add_argument("--done-text", default=None, help="end the run as done once the page shows this text")
     q.add_argument("--out", default=None)
     q.add_argument("--runs", default=None, help="write a replayable run folder under this directory")
     q.add_argument("--sites", default="sites", help="folder of <domain>.toml site files (default: ./sites)")
@@ -565,6 +616,7 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--goal", default=None, help="goal for scenarios that do not set one")
     b.add_argument("--expect-url", default=None, help="text a passing run's final address contains")
     b.add_argument("--only", default=None, help="comma-separated scenario names to run")
+    b.add_argument("--min-confidence", type=float, default=None, help="for scenarios that do not set one (default 0.4)")
     b.add_argument("--sites", default="sites")
     b.add_argument("--runs", default="runs", help="where run folders and the results JSON go")
     b.add_argument("--headed", action="store_true")
@@ -590,10 +642,14 @@ def main(argv: list[str] | None = None) -> int:
     config.load_dotenv(DOTENV)
     try:
         credentials = config.basic_auth()
+        login = config.form_login()
+        otp = config.form_otp()
     except ValueError as e:
         sys.exit(str(e))
     if credentials:
         print(f"basic auth: answered for https://{credentials[0]} only")
+    if login:
+        print(f"form login: filled in on https://{login[0]} only" + (", with a fixed one-time code" if otp else ""))
     return int(args.func(args))
 
 

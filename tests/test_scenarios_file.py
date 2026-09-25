@@ -64,3 +64,27 @@ def test_a_bad_scenario_file_stops_before_any_browser(tmp_path, text, complaint)
 def test_a_csv_row_with_more_cells_than_the_header_is_an_error(tmp_path):
     with pytest.raises(ValueError, match="more cells than the header"):
         load_scenarios(write(tmp_path / "o.csv", "phone\n1,2\n"), defaults={"url": "u", "goal": "g"})
+
+
+def test_min_confidence_is_a_setting_per_row(tmp_path):
+    rows = tmp_path / "rows.csv"
+    rows.write_text("name,url,goal,min_confidence\na,https://x.test/,g,0.35\nb,https://x.test/,g,\n", encoding="utf-8")
+    a, b = load_scenarios(rows)
+    assert a.min_confidence == 0.35 and b.min_confidence == 0.4
+
+    a, b = load_scenarios(rows, defaults={"min_confidence": 0.3})
+    assert a.min_confidence == 0.35 and b.min_confidence == 0.3
+
+
+def test_min_confidence_outside_zero_to_one_is_refused(tmp_path):
+    rows = tmp_path / "rows.csv"
+    rows.write_text("name,url,goal,min_confidence\na,https://x.test/,g,4\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="min_confidence must be between 0 and 1"):
+        load_scenarios(rows)
+
+
+def test_done_text_is_a_setting_per_row(tmp_path):
+    rows = tmp_path / "rows.csv"
+    rows.write_text("name,url,goal,done_text\na,https://x.test/,g,Thank you\nb,https://x.test/,g,\n", encoding="utf-8")
+    a, b = load_scenarios(rows)
+    assert a.done_text == "Thank you" and b.done_text is None

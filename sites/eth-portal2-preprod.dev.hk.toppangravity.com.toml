@@ -1,0 +1,24 @@
+# What is known about the Ethiopian ePassport preprod portal. Facts, not steps: they join the
+# classifier's state on every page of it. See typesafe_computer_use/sites.py for the format.
+domain = "eth-portal2-preprod.dev.hk.toppangravity.com"
+
+# Quit abandons the application in progress; Fayda auto-fill sends the browser to an outside
+# identity site to sign in there; Edit on the review page goes back to an earlier section. A run
+# filling the form from its data has no reason to press any of them; and a test run never pays.
+avoid = ["Quit Application", "Yes, auto-fill my information", "Edit", "Proceed to Payment"]
+
+notes = [
+    "On the Authentication page, the masked email address (such as ab***@gmail.com) is the account's registered address: selecting it and then pressing Send OTP is how sign-in continues. The one-time code itself is filled in automatically.",
+    "Sending a one-time code takes a few seconds, during which its button reads 'Sending...'.",
+    "Quit Application abandons the application in progress. It never moves an application forward.",
+    "An application page loads its next section after Next is pressed; for a moment only the Quit Application button may show.",
+    "The terms and conditions page is long: its I Accept checkbox and Next button sit below the terms, out of view until the page is scrolled down. Its Select language list changes only the language the terms are shown in.",
+    "Fields marked (Amharic) take text in Ge'ez script; fields marked (English) take Latin letters.",
+    "Choosing Fayda number as the identification type offers to auto-fill from Fayda: 'Yes, auto-fill my information' sends the browser to the outside Verifayda identity site (esignet.ida.fayda.et) to sign in there; 'No, I'll fill in the form manually' keeps the application on this portal.",
+    "Under Guardian details, Born in starts at Outside Ethiopia. Its Place of birth list offers countries while Outside Ethiopia is chosen, and Ethiopian regions such as ADDIS ABABA only once the Ethiopia radio button is chosen.",
+    "On the Appointment details page, the service type cards and the collection office can be chosen only after an Enrollment office is chosen.",
+    "On the Appointment details page, once a date is chosen its time slots are listed, one button each; the Next button sits below the list, out of view until the page is scrolled down.",
+    "The review page lists every section of the application for a last look; the button that submits it is at the bottom, below all of them.",
+    "After Confirm on the review page, the application is submitted: the page then says 'The application is not completed until payment is made.' and offers Proceed to Payment, which is the payment step.",
+    "The date of birth field opens a calendar over the form. A date typed into it is taken only when the calendar's Confirm button is pressed, which also closes the calendar.",
+]

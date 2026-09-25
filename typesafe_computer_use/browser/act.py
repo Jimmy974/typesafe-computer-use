@@ -7,7 +7,9 @@ pointer events behave exactly as they would for a human.
 
 from __future__ import annotations
 
+import mimetypes
 import time
+from pathlib import Path
 from typing import Any
 
 from .cdp import CDPError, Session
@@ -74,6 +76,33 @@ def click(session: Session, index: int, element: Element, page: Page) -> str:
     rect = element_rect(session, index)
     if rect is None:
         return f"click {index} FAILED (element gone)"
+    if not rect.get("hit", True):
+        # Something sits over it where it is, often a bar pinned to the bottom of the window:
+        # brought to the middle of the view, it is usually clear of it.
+        session.evaluate(
+            f"""(() => {{
+              const el = document.querySelector({_select(index)!r});
+              if (el) el.scrollIntoView({{block: "center", inline: "center"}});
+              return true;
+            }})()"""
+        )
+        time.sleep(0.05)
+        rect = element_rect(session, index) or rect
+    x, y = _press(session, rect)
+    retried = ""
+    if element.checked is False and _is_checked(session, index) is False:
+        # An unticked box or radio that is still unticked missed: the page was likely still
+        # moving, as when it scrolls itself to an error. Once more, from where it is now.
+        time.sleep(0.15)
+        if _is_checked(session, index) is False and (again := element_rect(session, index)):
+            rect = again
+            x, y = _press(session, rect)
+            retried = ", pressed again"
+    covered = "" if rect.get("hit", True) else " (something covers it there)"
+    return f"click [{index}] {element.name[:60]!r} at ({x},{y}){covered}{retried}"
+
+
+def _press(session: Session, rect: dict) -> tuple[int, int]:
     x = max(1, min(int(rect["x"]), max(1, int(rect["vw"]) - 2)))
     y = max(1, min(int(rect["y"]), max(1, int(rect["vh"]) - 2)))
     for kind in ("mouseMoved", "mousePressed", "mouseReleased"):
@@ -81,8 +110,19 @@ def click(session: Session, index: int, element: Element, page: Page) -> str:
             "Input.dispatchMouseEvent",
             {"type": kind, "x": x, "y": y, "button": "left", "clickCount": 1, "buttons": 1 if kind != "mouseReleased" else 0},
         )
-    covered = "" if rect.get("hit", True) else " (something covers it there)"
-    return f"click [{index}] {element.name[:60]!r} at ({x},{y}){covered}"
+    return x, y
+
+
+def _is_checked(session: Session, index: int) -> bool | None:
+    """Whether a box or radio is ticked now; None when it is gone or is not one."""
+    value = session.evaluate(
+        f"""(() => {{ const el = document.querySelector({_select(index)!r});
+                     if (!el) return null;
+                     if (typeof el.checked === "boolean") return el.checked;
+                     const aria = el.getAttribute("aria-checked");
+                     return aria === null ? null : aria === "true"; }})()"""
+    )
+    return value if isinstance(value, bool) else None
 
 
 def focus(session: Session, index: int) -> bool:
@@ -116,6 +156,98 @@ def field_value(session: Session, index: int) -> str | None:
                      return String(el.value); }})()"""
     )
     return None if value is None else str(value)
+
+
+def select_options(session: Session, index: int) -> list[tuple[int, str]]:
+    """The choices a <select> offers, by the text the page wrote for each: (option index, text).
+
+    A disabled option and a placeholder with no value, such as "Select language", are left out."""
+    options = session.evaluate(
+        f"""(() => {{ const el = document.querySelector({_select(index)!r});
+                     if (!el || el.tagName !== "SELECT") return [];
+                     return [...el.options].map((o, i) => [i, o.text.replace(/\\s+/g, " ").trim(), o.disabled || o.value === ""])
+                       .filter(o => !o[2] && o[1]).map(o => [o[0], o[1].slice(0, 120)]); }})()"""
+    )
+    return [(int(i), str(text)) for i, text in options or []]
+
+
+def select_option(session: Session, index: int, option: int) -> bool:
+    """Pick one option of a <select> the way a person's choice lands: the page's own listeners hear it.
+
+    A click opens the browser's own list, which the page cannot draw and a click cannot reach; the
+    value is set instead, through the setter a framework watches, and announced."""
+    return (
+        session.evaluate(
+            f"""(() => {{ const el = document.querySelector({_select(index)!r});
+                         if (!el || el.tagName !== "SELECT" || !el.options[{int(option)}]) return false;
+                         const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set;
+                         el.focus();
+                         setter.call(el, el.options[{int(option)}].value);
+                         el.dispatchEvent(new Event("input", {{bubbles: true}}));
+                         el.dispatchEvent(new Event("change", {{bubbles: true}}));
+                         return el.selectedIndex === {int(option)}; }})()"""
+        )
+        is True
+    )
+
+
+# Every empty file input on the page, shown or not: a page usually hides the real input behind a
+# button or a drop area of its own. `about` is the nearest short text around it, to match a name.
+FILE_INPUTS_JS = r"""
+(() => [...document.querySelectorAll('input[type="file"]')].map((el, i) => {
+  let about = "", box = el;
+  for (let up = 0; up < 6 && box && !about; up++, box = box.parentElement) {
+    const text = (box.innerText || "").replace(/\s+/g, " ").trim();
+    if (text && text.length <= 160) about = text;
+  }
+  return {i, empty: !(el.files && el.files.length), accept: el.getAttribute("accept") || "", about: about.slice(0, 120)};
+}))()
+"""
+
+
+def _accepts(accept: str, path: str) -> bool:
+    if not accept.strip():
+        return True
+    suffix = Path(path).suffix.lower()
+    mime = mimetypes.guess_type(path)[0] or ""
+    for token in (t.strip().lower() for t in accept.split(",")):
+        if token in (suffix, mime) or (token.endswith("/*") and mime.startswith(token[:-1])):
+            return True
+    return False
+
+
+def upload_files(session: Session, files: dict[str, str], *, skip: set[str] | None = None) -> list[str]:
+    """Put a saved file into every empty file input it fits, and say what went where.
+
+    With one saved file, it goes into each empty input that accepts it. With several, an input
+    takes the one whose name its surrounding text mentions. The page hears it as a person's choice:
+    the browser fills the input and fires its events. Many pages empty the input once they have
+    the file, so an input is skipped when its surroundings already name a saved file, or when its
+    surroundings are in `skip`, the places this run has filled; each place filled is added there."""
+    skip = skip if skip is not None else set()
+    names = [Path(p).name.casefold() for p in files.values()]
+    done = []
+    for spot in session.evaluate(FILE_INPUTS_JS) or []:
+        if not spot.get("empty"):
+            continue
+        about = str(spot.get("about") or "")
+        if about in skip or any(name in about.casefold() for name in names):
+            continue
+        named = (k for k in files if k.casefold() in about.casefold())
+        key = next(iter(files)) if len(files) == 1 else next(named, None)
+        if key is None or not _accepts(str(spot.get("accept") or ""), files[key]):
+            continue
+        found = session.call(
+            "Runtime.evaluate",
+            {"expression": f"document.querySelectorAll('input[type=\"file\"]')[{int(spot['i'])}]", "returnByValue": False},
+        )
+        object_id = ((found or {}).get("result") or {}).get("objectId")
+        if not object_id:
+            continue
+        session.call("DOM.setFileInputFiles", {"files": [files[key]], "objectId": object_id})
+        skip.add(about)
+        done.append(f"{key} into {about[:50]!r}" if about else key)
+    return done
 
 
 def clear_field(session: Session, index: int) -> None:
@@ -182,7 +314,14 @@ def wait_for_load(session: Session, *, timeout_ms: int = 15000, settle_ms: int =
 def fingerprint(page: Page) -> tuple:
     """Cheap identity for 'is this still the same page?'."""
     # Checking a box or filling a field changes the page as much as a new link does.
-    return (page.url, page.title, page.scroll_y, tuple((e.index, e.name, e.x, e.y, e.checked, e.filled) for e in page.items))
+    # So does a message appearing, such as an error after a button press.
+    return (
+        page.url,
+        page.title,
+        page.scroll_y,
+        tuple((e.index, e.name, e.x, e.y, e.checked, e.filled, e.chosen, e.invalid) for e in page.items),
+        page.messages,
+    )
 
 
 def observe_until_changed(

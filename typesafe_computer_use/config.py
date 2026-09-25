@@ -104,16 +104,42 @@ def email() -> str | None:
     return os.environ.get("CLICKER_EMAIL") or None
 
 
-def basic_auth() -> tuple[str, str, str] | None:
-    """CLICKER_BASIC_AUTH="<host> <user>:<password>": HTTP basic auth for that one host, or None.
-
-    Read from the environment or .env only, so the password is never on a command line, in a
-    scenario file, or in anything committed. The password may hold colons and dollar signs."""
-    raw = os.environ.get("CLICKER_BASIC_AUTH", "").strip()
+def _host_credentials(name: str) -> tuple[str, str, str] | None:
+    """A "<host> <user>:<password>" setting, or None when it is unset. The password may hold colons."""
+    raw = os.environ.get(name, "").strip()
     if not raw:
         return None
     host, _, credentials = raw.partition(" ")
     user, colon, password = credentials.strip().partition(":")
     if "/" in host or ":" in host or not host or not colon or not user or not password:
-        raise ValueError('CLICKER_BASIC_AUTH must be "<host> <user>:<password>", with a bare host name such as example.com')
+        raise ValueError(f'{name} must be "<host> <user>:<password>", with a bare host name such as example.com')
     return host.lower(), user, password
+
+
+def basic_auth() -> tuple[str, str, str] | None:
+    """CLICKER_BASIC_AUTH="<host> <user>:<password>": HTTP basic auth for that one host, or None.
+
+    Read from the environment or .env only, so the password is never on a command line, in a
+    scenario file, or in anything committed. The password may hold colons and dollar signs."""
+    return _host_credentials("CLICKER_BASIC_AUTH")
+
+
+def form_login() -> tuple[str, str, str] | None:
+    """CLICKER_FORM_LOGIN="<host> <user>:<password>": the site's own sign-in form, on that one host, or None.
+
+    Read the same way as CLICKER_BASIC_AUTH, and separate from it: a preprod host can need both."""
+    return _host_credentials("CLICKER_FORM_LOGIN")
+
+
+def form_otp() -> str | None:
+    """CLICKER_FORM_OTP: a fixed one-time code, as a preprod site takes, typed on the CLICKER_FORM_LOGIN host only.
+
+    A real site sends a new code every time, and this cannot help there: that one needs a person."""
+    code = os.environ.get("CLICKER_FORM_OTP", "").strip()
+    if not code:
+        return None
+    if not (code.isascii() and code.isalnum() and 4 <= len(code) <= 10):
+        raise ValueError("CLICKER_FORM_OTP must be 4 to 10 letters or digits")
+    if not os.environ.get("CLICKER_FORM_LOGIN", "").strip():
+        raise ValueError("CLICKER_FORM_OTP needs CLICKER_FORM_LOGIN: the code is typed only on that host")
+    return code

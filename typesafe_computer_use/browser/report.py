@@ -77,6 +77,7 @@ class RunFolder:
                     "element_count": len(page.items),
                     "candidates": page.candidates,
                     "below_fold": page.below_fold,
+                    "messages": list(page.messages),
                     "items": [asdict(e) for e in page.items],
                 },
                 indent=2,
@@ -153,6 +154,7 @@ def page_from_elements(data: dict) -> Page:
         scroll_y=int(data.get("scroll_y", 0)),
         candidates=int(data.get("candidates", len(items))),
         below_fold=int(data.get("below_fold", 0)),
+        messages=tuple(data.get("messages") or ()),
     )
 
 

@@ -14,7 +14,7 @@ from typesafe_computer_use.browser.decide import available_actions
 from typesafe_computer_use.browser.perceive import INTERACTIVE_JS, Element, perceive
 
 
-def page_dict(*, items=(), scroll_y=0, can_scroll=True, history_len=1, fields=0):
+def page_dict(*, items=(), scroll_y=0, can_scroll=True, history_len=1, fields=0, below_fold=800):
     return {
         "url": "https://example.test/",
         "title": "Example",
@@ -25,7 +25,7 @@ def page_dict(*, items=(), scroll_y=0, can_scroll=True, history_len=1, fields=0)
         "scroll_y": scroll_y,
         "scroll_max": 4000,
         "candidates": 900,
-        "below_fold": 800,
+        "below_fold": below_fold,
         "can_scroll": can_scroll,
         "history_len": history_len,
         "fields": fields,
@@ -119,7 +119,7 @@ def test_free_text_actions_need_a_writer():
 
 
 def test_scroll_and_back_are_offered_only_when_they_can_do_something():
-    flat_start = perceive(StubSession([page_dict(items=[element_dict()], can_scroll=False, history_len=1)]))
+    flat_start = perceive(StubSession([page_dict(items=[element_dict()], can_scroll=False, history_len=1, below_fold=0)]))
     actions = available_actions(flat_start)
     assert "scroll_down" not in actions and "scroll_up" not in actions
     assert "back" not in actions
@@ -191,3 +191,102 @@ def test_the_session_only_connects_to_this_chromes_loopback_port():
     ):
         with pytest.raises(CDPError):
             local_debugger_url(other, 9222)
+
+
+def test_a_page_read_that_fails_mid_navigation_is_asked_once_more(monkeypatch):
+    import sys
+
+    monkeypatch.setattr(
+        sys.modules["typesafe_computer_use.browser.perceive"],
+        "time",
+        type("T", (), {"sleep": staticmethod(lambda _: None), "perf_counter": staticmethod(__import__("time").perf_counter)}),
+    )
+
+    class Replacing:
+        def __init__(self):
+            self.calls = 0
+
+        def evaluate(self, expression, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise CDPError("JS error: Uncaught")
+            return page_dict(items=[element_dict()])
+
+    session = Replacing()
+    page = perceive(session)
+    assert session.calls == 2 and len(page.items) == 1
+
+
+def test_the_message_scan_cannot_take_the_element_list_down_with_it():
+    assert "} catch (e) { messages.length = 0; }" in INTERACTIVE_JS
+
+
+def test_red_text_counts_as_a_message_even_without_a_telltale_word():
+    # "New passport applications from outside Ethiopia are only available for applicants under 18."
+    # carries no error word; the page shows it only in red.
+    assert "!MESSAGE.test(n.nodeValue) && !reddish(el) && !inDialog" in INTERACTIVE_JS
+
+
+def test_a_covered_element_is_brought_to_the_middle_before_it_is_pressed(monkeypatch):
+    monkeypatch.setattr(act.time, "sleep", lambda _: None)
+    rects = [
+        {"x": 1220, "y": 811, "vw": 1440, "vh": 900, "hit": False},
+        {"x": 1220, "y": 450, "vw": 1440, "vh": 900, "hit": True},
+    ]
+
+    class Session:
+        def __init__(self):
+            self.scrolled, self.pressed = 0, []
+
+        def evaluate(self, expression, **kwargs):
+            if "scrollIntoView" in expression:
+                self.scrolled += 1
+                return True
+            return rects.pop(0)
+
+        def call(self, method, params=None):
+            self.pressed.append((params or {}).get("y"))
+            return {}
+
+    session = Session()
+    element = perceive(StubSession([page_dict(items=[element_dict(name="Next", tag="button")])])).items[0]
+    detail = act.click(session, 0, element, None)
+
+    assert session.scrolled == 1
+    assert set(session.pressed) == {450}
+    assert "covers" not in detail
+
+
+def test_an_unticked_radio_that_stays_unticked_is_pressed_once_more(monkeypatch):
+    monkeypatch.setattr(act.time, "sleep", lambda _: None)
+    ticks = [False, False, True]
+
+    class Session:
+        def __init__(self):
+            self.presses = 0
+
+        def evaluate(self, expression, **kwargs):
+            if "el.checked" in expression:
+                return ticks.pop(0)
+            return {"x": 486, "y": 279, "vw": 1440, "vh": 900, "hit": True}
+
+        def call(self, method, params=None):
+            if (params or {}).get("type") == "mousePressed":
+                self.presses += 1
+            return {}
+
+    session = Session()
+    radio = perceive(
+        StubSession([page_dict(items=[element_dict(name="Ethiopia", tag="input", role="radio", checked=False)])])
+    ).items[0]
+    detail = act.click(session, 0, radio, None)
+
+    assert session.presses == 2 and detail.endswith(", pressed again")
+
+
+def test_a_control_drawn_as_switched_off_is_not_offered():
+    assert 'el.getAttribute("aria-disabled") === "true" || st.cursor === "not-allowed"' in INTERACTIVE_JS
+
+
+def test_a_slot_or_toggle_says_whether_it_is_the_chosen_one():
+    assert '["aria-pressed", "aria-selected", "aria-current"]' in INTERACTIVE_JS

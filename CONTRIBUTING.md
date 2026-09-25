@@ -20,7 +20,10 @@ so a stall can be replayed offline with `--image`.
   reaches them through `platform_adapter.desktop`, and a new adapter call goes into the
   `Desktop` protocol and both adapters together. The accessibility-tree walk is shared, in
   `ax_walk.py`.
-- Never add a path that types a password.
+- Never add a general path that types a password. The sole exception is the explicitly
+  host-bound form login (`CLICKER_FORM_LOGIN`): its credentials come from local environment
+  variables, are sent only to the exact HTTPS host named with them, stay out of classifier state and run artifacts, and hand
+  off for manual input on MFA, CAPTCHA or an ambiguous form.
 
 ## A task the loop cannot do
 

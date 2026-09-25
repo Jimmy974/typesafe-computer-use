@@ -353,3 +353,231 @@ def test_a_load_check_asked_mid_navigation_is_asked_again_not_a_crash():
 
     act.wait_for_load(Navigating(login_page()), timeout_ms=1000, settle_ms=0)
     assert Navigating.asks == 2
+
+
+class Unsure(FakeTypeSafe):
+    """A classifier that is unsure of its first action, then sure of the next ones."""
+
+    def __init__(self, first: float, *steps):
+        super().__init__(*steps)
+        self.first = first
+
+    def system_one(self, *, state, questions, model=None):
+        answer = super().system_one(state=state, questions=questions, model=model)
+        if self.first is not None and "kind" in answer.answers:
+            kind = answer.answers["kind"].choice
+            answer.answers["kind"] = choice(kind, self.first)
+            self.first = None
+        return answer
+
+
+def test_a_doubtful_click_is_held_not_carried_out(tmp_path):
+    browser = FakeBrowser(login_page())
+    result, _ = run(browser, Unsure(0.37, ("click", "2")), tmp_path, steps=3)
+
+    assert result.outcome == "low_confidence(0.37)"
+    assert not [p for m, p in browser.inputs if m == "Input.dispatchMouseEvent"]
+    assert result.steps[0].detail == "held click (0.37), waited 0s, nothing changed"
+
+
+def test_a_held_action_asks_again_when_the_page_moves_on(tmp_path, monkeypatch):
+    from typesafe_computer_use.browser import runner
+
+    browser = FakeBrowser(login_page())
+    arrived = login_page(url="https://example.test/home", title="Home")
+    arrived["items"] = [item(0, "Continue", tag="button", field=False)]
+    real = runner.act.observe_until_changed
+
+    def page_arrives(session, before, **kwargs):
+        browser.page = arrived
+        return real(session, before, **kwargs)
+
+    monkeypatch.setattr(runner.act, "observe_until_changed", page_arrives)
+    result, _ = run(browser, Unsure(0.37, ("click", "2"), ("click", "0")), tmp_path, steps=2)
+
+    assert result.steps[0].detail.startswith("held click (0.37), waited")
+    # Asked again on the new page, and this time sure: the click is carried out, not held.
+    assert result.steps[1].action == "click" and not result.steps[1].detail.startswith("held")
+
+
+def test_a_doubtful_scroll_is_carried_out_and_the_run_goes_on_when_the_page_moves(tmp_path, monkeypatch):
+    from typesafe_computer_use.browser import runner
+
+    browser = FakeBrowser(login_page(can_scroll=True))
+    moved = login_page(can_scroll=True, scroll_y=300)
+    moved["items"] = [item(0, "Next", tag="button", field=False)]
+    real = runner.act.observe_until_changed
+
+    def page_scrolls(session, before, **kwargs):
+        if any(m == "Input.dispatchMouseEvent" and p.get("type") == "mouseWheel" for m, p in browser.inputs):
+            browser.page = moved
+            return runner.perceive(session), 0.0, True
+        return real(session, before, **kwargs)
+
+    monkeypatch.setattr(runner.act, "observe_until_changed", page_scrolls)
+    result, _ = run(browser, Unsure(0.30, ("scroll_down", None), ("done", None)), tmp_path, steps=3)
+
+    assert result.steps[0].action == "scroll_down" and not result.steps[0].detail.startswith("held")
+    assert len(result.steps) == 2
+
+
+def test_the_pages_own_error_line_reaches_the_classifier_and_the_run_folder(tmp_path):
+    notice = "Error! Please wait 600 seconds before requesting a new code."
+    browser = FakeBrowser(login_page(messages=[notice]))
+    client = FakeTypeSafe(("wait", None))
+
+    _, folder = run(browser, client, tmp_path, steps=1)
+
+    assert client.requests[0]["state"]["page_messages"] == [notice]
+    assert notice in folder_text(folder)
+
+
+def test_a_quiet_page_sends_no_messages(tmp_path):
+    client = FakeTypeSafe(("wait", None))
+    run(FakeBrowser(login_page()), client, tmp_path, steps=1)
+    assert "page_messages" not in client.requests[0]["state"]
+
+
+def test_a_message_appearing_counts_as_the_page_changing():
+    from typesafe_computer_use.browser import act
+
+    before = perceive(FakeBrowser(login_page()))
+    after = perceive(FakeBrowser(login_page(messages=["Invalid code, try again."])))
+    assert act.fingerprint(before) != act.fingerprint(after)
+
+
+def test_a_filled_field_is_never_the_fallback_target():
+    page = login_page()
+    page["items"] = [
+        item(0, "Identification number", role="text", filled=True),
+        item(1, "Father's Name", role="text", filled=False),
+        item(2, "Male", role="radio", field=False),
+    ]
+    target, _ = typing_target(perceive(FakeBrowser(page)), 2)
+    assert target is not None and target.name == "Father's Name"
+
+    page["items"][1]["filled"] = True
+    target, why = typing_target(perceive(FakeBrowser(page)), 2)
+    assert target is None and why == "no field"
+
+
+def test_only_steps_in_a_row_that_do_nothing_end_the_run(tmp_path):
+    # A wait that sees nothing is a noop; the click between them does something, so the second
+    # wait is the first of a new run of them, and the classifier then finishes.
+    client = FakeTypeSafe(("wait", None), ("click", "2"), ("wait", None), ("done", None))
+    result, _ = run(FakeBrowser(login_page()), client, tmp_path, steps=5)
+    assert result.outcome == "done"
+
+    client = FakeTypeSafe(("wait", None), ("wait", None), ("done", None))
+    result, _ = run(FakeBrowser(login_page()), client, tmp_path, steps=5)
+    assert result.outcome == "stuck"
+
+
+def test_click_and_type_split_on_one_empty_field_is_typing(tmp_path):
+    class Split(FakeTypeSafe):
+        def system_one(self, *, state, questions, model=None):
+            answer = super().system_one(state=state, questions=questions, model=model)
+            if "kind" in answer.answers and len(self.requests) == 1:
+                answer.answers["kind"] = ChoiceAnswer(
+                    choice="type_text", probabilities={"type_text": 0.44, "click": 0.41, "scroll_down": 0.15}, confidence=0.38
+                )
+                answer.answers["element"] = choice("0", 0.86)
+            return answer
+
+    writer = FakeWriter({"text": "alice"})
+    result, _ = run(FakeBrowser(login_page(), values={0: "alice"}), Split(), tmp_path, writer=writer, steps=1)
+
+    assert result.steps[0].action == "type_text"
+    assert not result.steps[0].detail.startswith("held")
+    assert result.steps[0].confidence == 0.85
+
+
+def test_a_held_action_scrolls_when_more_of_the_page_is_below(tmp_path):
+    browser = FakeBrowser(login_page(can_scroll=False, below_fold=3))
+    result, _ = run(browser, Unsure(0.21, ("click", "2")), tmp_path, steps=1)
+
+    assert result.steps[0].action == "wait"
+    assert result.steps[0].detail.startswith("held click (0.21), scroll down 3 lines, waited")
+    assert not [p for m, p in browser.inputs if p.get("type") == "mousePressed"]
+
+
+def test_a_field_the_page_marks_invalid_says_so_to_the_classifier():
+    page = login_page()
+    page["items"][0]["invalid"] = True
+    state = base_state("sign in", perceive(FakeBrowser(page)), [], url_catalog=None)
+    assert state["elements"][0]["invalid"] is True
+    assert "invalid" not in state["elements"][2]
+
+
+def test_a_fields_section_heading_reaches_the_classifier_and_its_label():
+    page = login_page()
+    page["items"][0]["section"] = "Guardian information"
+    parsed = perceive(FakeBrowser(page))
+    assert "under 'Guardian information'" in parsed.items[0].label()
+    state = base_state("sign in", parsed, [], url_catalog=None)
+    assert state["elements"][0]["section"] == "Guardian information"
+    assert "section" not in state["elements"][1]
+
+
+def test_an_action_the_browser_does_not_answer_is_a_failed_step_not_a_crash(tmp_path):
+    from typesafe_computer_use.browser.cdp import CDPError
+
+    class Stuck(FakeBrowser):
+        def call(self, method, params=None):
+            if method == "Input.dispatchMouseEvent" and (params or {}).get("type") == "mouseWheel":
+                raise CDPError("Input.dispatchMouseEvent: no answer in 30s")
+            return super().call(method, params)
+
+    result, _ = run(Stuck(login_page(can_scroll=True)), FakeTypeSafe(("scroll_down", None), ("done", None)), tmp_path, steps=3)
+    assert result.steps[0].detail.startswith("scroll_down -> the browser did not answer")
+    assert result.outcome == "done"
+
+
+def test_a_browser_that_stops_answering_ends_the_run_with_its_record(tmp_path):
+    from typesafe_computer_use.browser.cdp import CDPError
+
+    class Gone(FakeBrowser):
+        """Answers where the run starts, then nothing: the page has handed over to another site."""
+
+        asked = 0
+
+        def evaluate(self, expression, **kwargs):
+            if expression == "location.href" and not self.asked:
+                self.asked += 1
+                return super().evaluate(expression, **kwargs)
+            if expression is INTERACTIVE_JS or expression == "location.href":
+                raise CDPError("Runtime.evaluate: no answer in 30s")
+            return super().evaluate(expression, **kwargs)
+
+    session = Gone(login_page())
+    result = run_goal(session, FakeTypeSafe(), "g", max_steps=2, change_timeout_ms=0, verbose=False)
+    assert result.outcome == "browser_unresponsive" and result.url_after == ""
+
+
+def test_the_run_is_done_once_the_page_shows_the_done_text(tmp_path):
+    class Paying(FakeBrowser):
+        def evaluate(self, expression, **kwargs):
+            if "innerText" in expression and ".includes(" in expression:
+                return "not completed until payment" in expression
+            return super().evaluate(expression, **kwargs)
+
+    client = FakeTypeSafe(*[("scroll_down", None)] * 5)
+    result = run_goal(
+        Paying(login_page()),
+        client,
+        "g",
+        max_steps=5,
+        change_timeout_ms=0,
+        verbose=False,
+        done_text="The application is  NOT completed until payment",
+    )
+    assert result.outcome == "done" and client.requests == []
+
+
+def test_a_ticked_box_is_not_unticked_on_a_middling_answer(tmp_path):
+    page = login_page()
+    page["items"].append(item(3, "I Accept", role="checkbox", field=False, checked=True))
+    browser = FakeBrowser(page)
+    result, _ = run(browser, Unsure(0.7, ("click", "3")), tmp_path, steps=1)
+    assert result.steps[0].action == "wait"
+    assert not [p for m, p in browser.inputs if p.get("type") == "mousePressed"]

@@ -144,3 +144,24 @@ def test_on_a_site_with_a_settle_time_a_late_change_still_counts(tmp_path):
     )
     assert result.steps[0].changed
     assert client.requests[1]["state"]["page"]["url"] == "https://example.test/issues/3"
+
+
+def test_an_avoided_control_never_reaches_the_classifier(tmp_path):
+    from typesafe_computer_use.sites import parse_site
+
+    site = parse_site({"domain": "example.test", "avoid": ["  quit   APPLICATION "]})
+    assert site.avoids("Quit Application") and not site.avoids("Quit")
+
+    page = login_page()
+    page["items"].append({**page["items"][2], "index": 3, "name": "Quit Application"})
+    client = FakeTypeSafe(("wait", None))
+    run_goal(FakeBrowser(page), client, "sign in", max_steps=1, change_timeout_ms=0, verbose=False, sites=[site])
+    names = [e["text"] for e in client.requests[0]["state"]["elements"]]
+    assert "Quit Application" not in names and "Sign in" in names
+
+
+def test_avoid_must_be_a_list_of_names():
+    from typesafe_computer_use.sites import parse_site
+
+    with pytest.raises(ValueError, match="avoid must be a list"):
+        parse_site({"domain": "example.test", "avoid": "Quit"})
